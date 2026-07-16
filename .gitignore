@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+runtime/.venv/
+*.egg-info/
+
+# Node
+node_modules/
+server/node_modules/
+dist/
+
+# Data / secrets
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.log
+
+# Private product documentation — kept local, not published
+jaroku-product-documentation*.md

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jaroku — Trace Debug Client</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #0d0d0f; color: #e4e4e7;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px; line-height: 1.5;
+    }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 20px; border-bottom: 1px solid #1e1e22;
+    }
+    header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+    header .muted { color: #71717a; font-size: 12px; }
+    button {
+      font: inherit; background: #18181b; color: #e4e4e7;
+      border: 1px solid #2a2a2e; border-radius: 6px; padding: 6px 12px; cursor: pointer;
+    }
+    button:hover { background: #1e1e22; }
+    input {
+      font: inherit; background: #18181b; color: #e4e4e7;
+      border: 1px solid #2a2a2e; border-radius: 6px; padding: 6px 10px; width: 360px;
+    }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #71717a; display: inline-block; }
+    #dot.on { background: #22c55e; }
+    main { padding: 12px 20px; }
+    .step { padding: 8px 0; border-bottom: 1px solid #141417; }
+    .row { display: flex; gap: 10px; align-items: baseline; }
+    .seq { color: #52525b; min-width: 34px; }
+    .badge { font-size: 11px; padding: 1px 7px; border-radius: 4px; }
+    .llm_call { background: #1e293b; color: #93c5fd; }
+    .tool_call { background: #1c2b1c; color: #86efac; }
+    .state_update { background: #2a2320; color: #fbbf24; }
+    .router { background: #2a1c2e; color: #d8b4fe; }
+    .run_start, .run_end { color: #71717a; font-style: italic; padding: 6px 0; }
+    .name { color: #e4e4e7; }
+    .meta { color: #71717a; font-size: 12px; margin-left: auto; }
+    .err { color: #ef4444; }
+    details summary { cursor: pointer; color: #71717a; margin-left: 44px; }
+    pre { white-space: pre-wrap; word-break: break-word; color: #a1a1aa; margin: 4px 0 0 44px; font-size: 12px; }
+    #log { color: #52525b; font-size: 11px; padding: 8px 20px; border-top: 1px solid #1e1e22; max-height: 120px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <span id="dot"></span>
+    <h1>Jaroku Trace</h1>
+    <span id="status" class="muted">connecting…</span>
+    <input id="input" placeholder="agent input (optional)" />
+    <button id="run">Run agent</button>
+    <button id="clear">Clear</button>
+    <span id="runinfo" class="muted"></span>
+  </header>
+  <main id="steps"></main>
+  <div id="log"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const stepsEl = $("steps"), logEl = $("log");
+
+    function addLog(text, cls) {
+      const d = document.createElement("div");
+      if (cls) d.className = cls;
+      d.textContent = text;
+      logEl.prepend(d);
+    }
+
+    function fmt(v) {
+      if (v == null) return "";
+      try { return typeof v === "string" ? v : JSON.stringify(v, null, 2); }
+      catch { return String(v); }
+    }
+
+    function renderStep(step) {
+      const wrap = document.createElement("div");
+      wrap.className = "step";
+      const meta = [];
+      if (step.tokens != null) meta.push(step.tokens + " tok");
+      if (step.cost != null) meta.push("$" + step.cost);
+      meta.push(step.latency_ms + " ms");
+      wrap.innerHTML = `
+        <div class="row">
+          <span class="seq">#${step.seq}</span>
+          <span class="badge ${step.type}">${step.type}</span>
+          <span class="name">${step.name}</span>
+          <span class="meta">${meta.join(" · ")}${step.error ? ' · <span class="err">ERROR</span>' : ""}</span>
+        </div>`;
+      const det = document.createElement("details");
+      det.innerHTML = `<summary>input / output${step.error ? " / error" : ""}</summary>`;
+      const pre = document.createElement("pre");
+      pre.textContent =
+        (step.error ? "ERROR: " + step.error + "\n\n" : "") +
+        "input:\n" + fmt(step.input) + "\n\noutput:\n" + fmt(step.output);
+      det.appendChild(pre);
+      wrap.appendChild(det);
+      stepsEl.appendChild(wrap);
+      wrap.scrollIntoView({ block: "nearest" });
+    }
+
+    function renderMarker(kind, run) {
+      const d = document.createElement("div");
+      d.className = kind;
+      const s = kind === "run_start"
+        ? `▶ run started — ${run.provider}/${run.model} (${run.id.slice(0, 8)})`
+        : `■ run ${run.status} — ${run.tokens} tok, $${run.cost}${run.error ? " — " + run.error : ""}`;
+      d.textContent = s;
+      stepsEl.appendChild(d);
+      $("runinfo").textContent = kind === "run_start" ? "running…" : run.status;
+    }
+
+    let ws;
+    function connect() {
+      ws = new WebSocket(`ws://${location.host}`);
+      ws.onopen = () => { $("dot").classList.add("on"); $("status").textContent = "connected"; };
+      ws.onclose = () => {
+        $("dot").classList.remove("on"); $("status").textContent = "disconnected — retrying…";
+        setTimeout(connect, 1000); // reconnect
+      };
+      ws.onmessage = (m) => {
+        const msg = JSON.parse(m.data);
+        if (msg.channel === "history") {
+          $("runinfo").textContent = `${msg.runs.length} past run(s)`;
+        } else if (msg.channel === "trace") {
+          const e = msg.event;
+          if (e.kind === "step") renderStep(e.step);
+          else renderMarker(e.kind, e.run);
+        } else if (msg.channel === "log") {
+          addLog(`[${msg.level}] ${msg.text}`, msg.level === "parseError" ? "err" : "");
+        }
+      };
+    }
+    connect();
+
+    $("run").onclick = () => {
+      stepsEl.innerHTML = "";
+      ws?.send(JSON.stringify({ cmd: "run", input: $("input").value || undefined }));
+    };
+    $("clear").onclick = () => { stepsEl.innerHTML = ""; logEl.innerHTML = ""; };
+  </script>
+</body>
+</html>
