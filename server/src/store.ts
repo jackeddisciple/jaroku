@@ -4,6 +4,10 @@
 import { DatabaseSync } from "node:sqlite";
 import type { Run, Step } from "./types.ts";
 
+// A run plus a cheap derived step count, for the sidebar history list. The frozen Run
+// schema is unchanged — step_count is a read-side convenience, not part of the event schema.
+export type RunSummary = Run & { step_count: number };
+
 export class TraceStore {
   private db: DatabaseSync;
 
@@ -87,10 +91,13 @@ export class TraceStore {
       );
   }
 
-  listRuns(limit = 50): Run[] {
+  listRuns(limit = 50): RunSummary[] {
     return this.db
-      .prepare(`SELECT * FROM runs ORDER BY started_at DESC LIMIT ?`)
-      .all(limit) as unknown as Run[];
+      .prepare(
+        `SELECT r.*, (SELECT COUNT(*) FROM steps s WHERE s.run_id = r.id) AS step_count
+         FROM runs r ORDER BY r.started_at DESC LIMIT ?`,
+      )
+      .all(limit) as unknown as RunSummary[];
   }
 
   stepsForRun(runId: string): Step[] {

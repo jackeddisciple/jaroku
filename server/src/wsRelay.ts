@@ -8,20 +8,23 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { TraceStore } from "./store.ts";
 import type { TraceEvent } from "./types.ts";
 
-export type ClientCommand = { cmd: "run"; input?: string; provider?: string };
+export type RunCommand = { cmd: "run"; input?: string; provider?: string };
+export type LoadRunCommand = { cmd: "loadRun"; runId: string };
+export type ClientCommand = RunCommand | LoadRunCommand;
 
 export interface RelayOptions {
   port: number;
   store: TraceStore;
   clientHtmlPath: string;
-  onCommand?: (cmd: ClientCommand) => void;
+  // Only "run" commands are forwarded; "loadRun" is answered locally by the relay.
+  onCommand?: (cmd: RunCommand) => void;
 }
 
 export class WsRelay {
   private wss: WebSocketServer;
   private clients = new Set<WebSocket>();
   private store: TraceStore;
-  private onCommand?: (cmd: ClientCommand) => void;
+  private onCommand?: (cmd: RunCommand) => void;
 
   constructor(private opts: RelayOptions) {
     this.store = opts.store;
@@ -36,10 +39,19 @@ export class WsRelay {
       this.sendTo(ws, { channel: "history", runs: this.store.listRuns() });
 
       ws.on("message", (data) => {
-        if (!this.onCommand) return;
         try {
           const msg = JSON.parse(data.toString()) as ClientCommand;
-          if (msg && msg.cmd === "run") this.onCommand(msg);
+          if (!msg || typeof msg.cmd !== "string") return;
+          if (msg.cmd === "run") {
+            this.onCommand?.(msg);
+          } else if (msg.cmd === "loadRun" && typeof msg.runId === "string") {
+            // Answer only the requesting client with that run's steps (ordered by seq).
+            this.sendTo(ws, {
+              channel: "runSteps",
+              runId: msg.runId,
+              steps: this.store.stepsForRun(msg.runId),
+            });
+          }
         } catch {
           /* ignore malformed client messages */
         }
