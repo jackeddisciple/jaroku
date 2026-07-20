@@ -137,7 +137,9 @@ def main() -> int:
 
     run = Run(id=str(uuid.uuid4()), agent_id="test_agent",
               provider=provider, model=model_name)
-    tracer = JarokuTracer(run)
+    # Passing the compiled graph lets the tracer identify conditional edges exactly
+    # (graph.builder.branches) instead of inferring them.
+    tracer = JarokuTracer(run, graph=app)
 
     log(f"[jaroku] run {run.id} provider={provider} model={model_name}")
     emit_run_start(run)

@@ -58,6 +58,29 @@ export class TraceStore {
     return JSON.stringify(v);
   }
 
+  // Inverse of `j`. The payload columns are TEXT, so a row read straight back out carries
+  // JSON *strings* where the Step schema promises parsed values — a step replayed from
+  // history would then be a different shape than the same step streamed live. Parse on the
+  // way out so both paths hand consumers identical objects.
+  private static unj(v: unknown): unknown {
+    if (typeof v !== "string") return v ?? null;
+    try {
+      return JSON.parse(v);
+    } catch {
+      return v; // Not JSON (shouldn't happen) — hand back the raw text rather than throw.
+    }
+  }
+
+  private static hydrateStep(row: Record<string, unknown>): Step {
+    return {
+      ...row,
+      input: TraceStore.unj(row["input"]),
+      output: TraceStore.unj(row["output"]),
+      state_before: TraceStore.unj(row["state_before"]),
+      state_after: TraceStore.unj(row["state_after"]),
+    } as Step;
+  }
+
   // Insert (or replace, for the run_end update) a run.
   upsertRun(run: Run): void {
     this.db
@@ -101,9 +124,10 @@ export class TraceStore {
   }
 
   stepsForRun(runId: string): Step[] {
-    return this.db
+    const rows = this.db
       .prepare(`SELECT * FROM steps WHERE run_id = ? ORDER BY seq ASC`)
-      .all(runId) as unknown as Step[];
+      .all(runId) as unknown as Record<string, unknown>[];
+    return rows.map(TraceStore.hydrateStep);
   }
 
   close(): void {

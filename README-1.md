@@ -624,13 +624,19 @@ emitted (killed before completion), and `process.kill(pid, 0)` confirmed the pro
 
 These are **intentional** — the doc's discipline is "prove the core, defer breadth."
 
-- **`router` steps are not auto-captured.** A conditional-edge decision isn't a LangChain callback,
-  so it isn't emitted as its own step yet; the routing outcome is visible inside the adjacent
-  `agent` node's output (`"tools"` / `"__end__"`). The schema fully supports `router`; explicit
-  capture can be added later.
+- ~~**`router` steps are not auto-captured.**~~ **RESOLVED.** The original claim — that a
+  conditional-edge decision isn't a LangChain callback — was **wrong**. LangGraph coerces the
+  path function with `trace=True` (`langgraph/graph/state.py`, `add_conditional_edges`), so it
+  *does* fire `on_chain_start`/`on_chain_end`. Worse, it carried the source node's
+  `metadata.langgraph_node`, so it was slipping through the node filter and being emitted as a
+  **mislabeled `state_update`** with the branch string in `state_after` — which is why the old
+  §10.3 trace showed `agent` twice per turn. Routers are now classified explicitly (precisely
+  via `graph.builder.branches`, or by a heuristic that must survive an end-time output-shape
+  check) and emitted as `Step(type="router")` with `output` = the chosen branch and null state.
 - **Node-level `state_update` granularity is approximate.** State snapshots come from chain
-  input/output payloads, which is faithful enough to render diffs but not a formal per-node state
-  machine. Precise pause/inspect/resume + state-diff machinery is later `🔴 self-code` work.
+  input/output payloads. Note that `state_after` is the node's **partial return**, not the
+  reducer-merged post-state — the UI's diff accounts for this and never renders an unprovable
+  removal. Precise pause/inspect/resume + state-diff machinery is later `🔴 self-code` work.
 - **No product UI.** `debug-client.html` is a verification harness, not the Trace Timeline. The
   real three-pane UI (React + Tailwind, resizable panels, graph/trace/eval tabs) comes later.
 - **No generation, eval, or deploy** yet — those are later layers of the build plan.

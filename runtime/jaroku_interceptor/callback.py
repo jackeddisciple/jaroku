@@ -5,6 +5,7 @@ Mapping:
   on_chat_model_start / on_llm_start  + on_llm_end   -> Step(type="llm_call")
   on_tool_start                       + on_tool_end  -> Step(type="tool_call")
   on_chain_start (langgraph node)     + on_chain_end -> Step(type="state_update")
+  on_chain_start (conditional edge)   + on_chain_end -> Step(type="router")
 
 Design notes:
   * ``seq`` is assigned at *start* time, so steps sort in causal start order even though
@@ -13,6 +14,21 @@ Design notes:
     LangChain run_id is registered to its Jaroku step id at start, so children can look
     up their parent.
   * The tracer must never crash the agent it observes — payload capture is best-effort.
+
+Router capture:
+  LangGraph coerces a conditional-edge function with ``trace=True``, so the router *does*
+  fire on_chain_start/on_chain_end — nested inside the source node's chain, carrying that
+  node's ``metadata.langgraph_node`` and returning the chosen branch from on_chain_end.
+  Without the classification below it slips through the ``langgraph_node`` filter and is
+  mislabeled as a ``state_update`` of the node, with the branch string in ``state_after``.
+
+  Classification is precise when the compiled graph is supplied (``JarokuTracer(run,
+  graph=app)``): ``graph.builder.branches`` yields the exact ``(node, branch_name)`` set.
+  Without it, a conservative heuristic proposes candidates that must still pass an
+  end-time output-shape check; anything that fails is emitted as a ``state_update``
+  exactly as before. A step's ``type`` is only materialized in ``_finish``, so a rejected
+  guess costs nothing — not even a ``seq``. Correctness over coverage: the trace must
+  never lie.
 """
 
 from __future__ import annotations
@@ -45,9 +61,11 @@ def _price_for(model: str) -> Optional[tuple[float, float]]:
 
 
 class _Pending:
-    __slots__ = ("step_id", "seq", "type", "name", "input", "state_before", "t0", "parent")
+    __slots__ = ("step_id", "seq", "type", "name", "input", "state_before", "t0", "parent",
+                 "router_ends", "node")
 
-    def __init__(self, step_id, seq, type_, name, input_, state_before, t0, parent):
+    def __init__(self, step_id, seq, type_, name, input_, state_before, t0, parent,
+                 router_ends=None, node=None):
         self.step_id = step_id
         self.seq = seq
         self.type = type_
@@ -56,14 +74,38 @@ class _Pending:
         self.state_before = state_before
         self.t0 = t0
         self.parent = parent
+        # Router-only: the branch's {returned_value -> destination_node} map, when known.
+        self.router_ends = router_ends
+        # Router-only: the source node the conditional edge hangs off.
+        self.node = node
+
+
+def _branch_index(graph: Any) -> Optional[dict[tuple[str, str], dict]]:
+    """Map ``(source_node, branch_name) -> ends`` from a compiled LangGraph.
+
+    ``ends`` is the branch's path_map (``{"tools": "tools", "__end__": "__end__"}``) or None.
+    Returns None if the graph doesn't expose branches — introspection is best-effort and
+    must never raise into the observed agent.
+    """
+    try:
+        branches = graph.builder.branches
+        index: dict[tuple[str, str], dict] = {}
+        for source, specs in branches.items():
+            for branch_name, spec in specs.items():
+                index[(str(source), str(branch_name))] = dict(getattr(spec, "ends", None) or {})
+        return index
+    except Exception:
+        return None
 
 
 class JarokuTracer(BaseCallbackHandler):
-    def __init__(self, run: Run):
+    def __init__(self, run: Run, graph: Any = None):
         self.run = run
         self._seq = 0
         self._pending: dict[UUID, _Pending] = {}
         self._runid_to_stepid: dict[UUID, str] = {}
+        # None => no graph supplied; fall back to the heuristic + end-time validation.
+        self._branches = _branch_index(graph) if graph is not None else None
 
     # ---- helpers -------------------------------------------------------------
     def _next_seq(self) -> int:
@@ -76,7 +118,8 @@ class JarokuTracer(BaseCallbackHandler):
             return None
         return self._runid_to_stepid.get(parent_run_id)
 
-    def _begin(self, run_id, parent_run_id, type_, name, input_, state_before=None) -> None:
+    def _begin(self, run_id, parent_run_id, type_, name, input_, state_before=None,
+               router_ends=None, node=None) -> None:
         step_id = str(uuid.uuid4())
         self._runid_to_stepid[run_id] = step_id
         self._pending[run_id] = _Pending(
@@ -88,10 +131,12 @@ class JarokuTracer(BaseCallbackHandler):
             state_before=state_before,
             t0=time.perf_counter(),
             parent=self._parent_step(parent_run_id),
+            router_ends=router_ends,
+            node=node,
         )
 
     def _finish(self, run_id, *, output=None, state_after=None, tokens=None,
-                cost=None, error=None) -> None:
+                cost=None, error=None, type_=None, name=None) -> None:
         pend = self._pending.pop(run_id, None)
         if pend is None:
             return
@@ -99,8 +144,8 @@ class JarokuTracer(BaseCallbackHandler):
             id=pend.step_id,
             run_id=self.run.id,
             seq=pend.seq,
-            type=pend.type,
-            name=pend.name,
+            type=type_ or pend.type,
+            name=name or pend.name,
             input=pend.input,
             output=output,
             state_before=pend.state_before,
@@ -149,18 +194,75 @@ class JarokuTracer(BaseCallbackHandler):
     def on_tool_error(self, error, *, run_id, **kwargs) -> None:
         self._finish(run_id, error=self._fmt_error(error))
 
-    # ---- Chains / LangGraph nodes -------------------------------------------
+    # ---- Chains / LangGraph nodes & conditional edges ------------------------
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None,
                        metadata=None, **kwargs) -> None:
         node = (metadata or {}).get("langgraph_node")
         if not node:
             # Not a graph node (top-level graph, RunnableSequence, etc.) — skip.
             return
+        chain_name = kwargs.get("name") or (serialized or {}).get("name")
+
+        ends = self._router_ends(node, chain_name, parent_run_id)
+        if ends is not None:
+            # A conditional edge. `input` is the state it reads; a router does not mutate
+            # state, so state_before/state_after stay null. Provisional until on_chain_end
+            # confirms the output really is a branch destination.
+            self._begin(run_id, parent_run_id, "router", chain_name or "router",
+                        input_=inputs, router_ends=ends, node=node)
+            return
+
         self._begin(run_id, parent_run_id, "state_update", node,
                     input_=inputs, state_before=inputs)
 
+    def _router_ends(self, node, chain_name, parent_run_id) -> Optional[dict]:
+        """Return the branch's `ends` map if this chain is a conditional edge, else None.
+
+        Precise when the compiled graph was supplied; otherwise a conservative heuristic
+        whose guess is still re-checked against the output shape at end time.
+        """
+        if not chain_name or chain_name == node:
+            # The node's own chain is never a router.
+            return None
+        if self._branches is not None:
+            return self._branches.get((str(node), str(chain_name)))
+        # Heuristic: a direct child of the source node's own chain. Anything deeper (a
+        # nested LCEL chain, a sub-runnable) is not a conditional edge.
+        parent = self._pending.get(parent_run_id) if parent_run_id is not None else None
+        if parent is not None and parent.type == "state_update" and parent.name == node:
+            return {}
+        return None
+
+    @staticmethod
+    def _as_destinations(outputs) -> Optional[list[str]]:
+        """Coerce a router return value to a list of branch labels, or None if it isn't one.
+
+        A conditional edge returns a destination (or a list of them). A node returns its
+        state update — a dict. Rejecting anything non-string-shaped is what keeps a
+        misclassified chain from being emitted as a bogus router.
+        """
+        if isinstance(outputs, str):
+            return [outputs]
+        if isinstance(outputs, (list, tuple)) and outputs and \
+                all(isinstance(o, str) for o in outputs):
+            return list(outputs)
+        return None
+
     def on_chain_end(self, outputs, *, run_id, **kwargs) -> None:
-        if run_id not in self._pending:
+        pend = self._pending.get(run_id)
+        if pend is None:
+            return
+        if pend.type == "router":
+            dests = self._as_destinations(outputs)
+            if dests is None:
+                # Not a routing decision after all — emit as the state_update it would
+                # have been, same seq, same payloads. Never corrupt the trace on a guess.
+                self._finish(run_id, output=outputs, state_after=outputs,
+                             type_="state_update", name=pend.node or pend.name)
+                return
+            ends = pend.router_ends or {}
+            chosen = [str(ends.get(d, d)) for d in dests]
+            self._finish(run_id, output=", ".join(chosen))
             return
         self._finish(run_id, output=outputs, state_after=outputs)
 
