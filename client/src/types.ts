@@ -45,16 +45,52 @@ export type TraceEvent =
   | { kind: "step"; schema_version: number; step: Step }
   | { kind: "run_end"; schema_version: number; run: Run };
 
+// --- generation ---
+// Deliberately NOT part of the frozen event schema above. Generation is a separate concern
+// on its own channel; it never enters the trace store.
+
+export interface AgentSummary {
+  agent_id: string;
+  name: string;
+  description: string;
+  connectors: string[];
+  required_env: string[];
+  default_provider: string;
+  created_at: string | null;
+  hand_written: boolean;
+  runnable: boolean;
+}
+
+export interface GenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cost_usd: number;
+}
+
+export type GenMessage =
+  | { channel: "gen"; type: "started"; prompt: string }
+  | { channel: "gen"; type: "file_start"; path: string }
+  | { channel: "gen"; type: "file_delta"; path: string; text: string }
+  | { channel: "gen"; type: "file_end"; path: string }
+  | { channel: "gen"; type: "done"; agentId: string; name: string; files: string[]; usage: GenUsage }
+  | { channel: "gen"; type: "error"; message: string; problems?: string[] };
+
 // --- server → client channel messages (see server/src/wsRelay.ts) ---
 
 export type ServerMessage =
   | { channel: "history"; runs: RunSummary[] }
   | { channel: "trace"; event: TraceEvent }
   | { channel: "runSteps"; runId: string; steps: Step[] }
-  | { channel: "log"; level: "stderr" | "parseError"; text: string };
+  | { channel: "log"; level: "stderr" | "parseError"; text: string }
+  | { channel: "agents"; agents: AgentSummary[] }
+  | GenMessage;
 
 // --- client → server commands ---
 
 export type ClientCommand =
-  | { cmd: "run"; input?: string; provider?: string }
-  | { cmd: "loadRun"; runId: string };
+  | { cmd: "run"; input?: string; provider?: string; model?: string; agentId?: string }
+  | { cmd: "loadRun"; runId: string }
+  | { cmd: "generate"; prompt: string; connectors?: string[]; name?: string }
+  | { cmd: "listAgents" };

@@ -10,6 +10,9 @@ export interface AgentRunOptions {
   runtimeDir: string; // cwd containing the uv project (runtime/)
   input?: string; // user input passed to the agent
   env?: NodeJS.ProcessEnv; // extra env (e.g. JAROKU_PROVIDER)
+  // A generated project under runtime/agents/. Omitted -> the hand-written fixture agent,
+  // which is kept as a spawn path so the original pipeline stays regression-testable.
+  agentId?: string;
 }
 
 // Typed events emitted by the manager.
@@ -33,7 +36,12 @@ export class ProcessManager extends EventEmitter<ProcessManagerEvents> {
   start(opts: AgentRunOptions): void {
     if (this.running) throw new Error("agent already running");
 
-    const args = ["run", "python", "-m", "test_agent.agent"];
+    // Generated agents run through jaroku_runner, which owns all trace wiring; the fixture
+    // traces itself. Both emit the identical event stream, so everything downstream of here
+    // is unchanged.
+    const args = opts.agentId
+      ? ["run", "python", "-m", "jaroku_runner", opts.agentId]
+      : ["run", "python", "-m", "test_agent.agent"];
     if (opts.input) args.push(opts.input);
 
     // uv lives in Homebrew's bin; make sure it's on PATH for the spawned process.

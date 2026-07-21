@@ -1,0 +1,66 @@
+{
+  "comment": "Connector registry. The Node builder reads this to (a) render connector signatures into the generation prompt, (b) copy the right template files into a generated project, and (c) build .env.example from required_env. Keep in sync with the .py files — tool_templates/__init__.py has a check_catalog() that verifies it.",
+  "schema_version": 1,
+  "connectors": [
+    {
+      "id": "gmail",
+      "label": "Gmail",
+      "file": "gmail.py",
+      "module": "gmail",
+      "description": "Search the user's mail and create draft replies. Creates drafts only — never sends.",
+      "required_env": ["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"],
+      "tools": [
+        {
+          "name": "gmail_search",
+          "signature": "gmail_search(query: str, max_results: int = 10) -> str",
+          "summary": "Search Gmail using Gmail search syntax (e.g. 'from:acme.com is:unread'). Returns sender, subject and snippet per match."
+        },
+        {
+          "name": "gmail_create_draft",
+          "signature": "gmail_create_draft(to: str, subject: str, body: str, reply_to_message_id: str = '') -> str",
+          "summary": "Create a draft reply. Does NOT send. Pass reply_to_message_id to thread onto an existing conversation."
+        }
+      ]
+    },
+    {
+      "id": "slack",
+      "label": "Slack",
+      "file": "slack.py",
+      "module": "slack",
+      "description": "List and read public channels, and post messages. Posting is immediate and cannot be undone.",
+      "required_env": ["SLACK_BOT_TOKEN"],
+      "tools": [
+        {
+          "name": "slack_list_channels",
+          "signature": "slack_list_channels(limit: int = 50) -> str",
+          "summary": "List public channels the bot can see, with ids and member counts."
+        },
+        {
+          "name": "slack_read_channel",
+          "signature": "slack_read_channel(channel: str, limit: int = 20) -> str",
+          "summary": "Read recent messages from a channel by name or id."
+        },
+        {
+          "name": "slack_post_message",
+          "signature": "slack_post_message(channel: str, text: str) -> str",
+          "summary": "Post a message to a channel. Irreversible — use only when the user asked for a message to be sent."
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "label": "Postgres",
+      "file": "postgres.py",
+      "module": "postgres",
+      "description": "Read-only SQL access. Writes and DDL are rejected by both a statement check and a read-only transaction.",
+      "required_env": ["DATABASE_URL"],
+      "tools": [
+        {
+          "name": "pg_query",
+          "signature": "pg_query(sql: str) -> str",
+          "summary": "Run ONE read-only SELECT (or WITH ... SELECT) and return rows, capped at 100. Writes, DDL and multi-statement input are rejected."
+        }
+      ]
+    }
+  ]
+}

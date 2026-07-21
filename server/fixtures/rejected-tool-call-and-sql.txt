@@ -1,0 +1,138 @@
+<<<FILE path="agent.py">>>
+"""Support Triage agent."""
+from __future__ import annotations
+
+import sys
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from .prompts import SYSTEM_PROMPT
+from .tools import TOOLS
+
+
+class AgentState(MessagesState):
+    customer_email: str | None
+    order_details: str | None
+    draft_created: bool
+
+
+def build_graph(llm):
+    model = llm.bind_tools(TOOLS)
+
+    def call_model(state: AgentState):
+        messages = state["messages"]
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            messages = [SystemMessage(SYSTEM_PROMPT), *messages]
+        return {"messages": [model.invoke(messages)]}
+
+    def should_continue(state: AgentState) -> str:
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else END
+
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ToolNode(TOOLS))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+def build_initial_state(user_input: str) -> dict:
+    return {
+        "messages": [HumanMessage(user_input)],
+        "customer_email": None,
+        "order_details": None,
+        "draft_created": False,
+    }
+<<<ENDFILE>>>
+<<<FILE path="tools/__init__.py">>>
+from .gmail import gmail_search, gmail_create_draft
+from .postgres import pg_query
+from .support import lookup_customer_orders
+
+TOOLS = [gmail_search, gmail_create_draft, pg_query, lookup_customer_orders]
+
+__all__ = ["TOOLS", "gmail_search", "gmail_create_draft", "pg_query", "lookup_customer_orders"]
+<<<ENDFILE>>>
+<<<FILE path="tools/support.py">>>
+from __future__ import annotations
+
+from langchain_core.tools import tool
+
+
+@tool
+def lookup_customer_orders(customer_email: str) -> str:
+    """Look up all orders for a customer by their email address from the database."""
+    from .postgres import pg_query
+    
+    query = f"""
+    SELECT id, order_date, status, total, items 
+    FROM orders 
+    WHERE customer_email = '{customer_email}' 
+    ORDER BY order_date DESC 
+    LIMIT 10
+    """
+    
+    result = pg_query(query)
+    if not result or "error" in result.lower():
+        return f"No orders found for {customer_email} or database error: {result}"
+    return result
+<<<ENDFILE>>>
+<<<FILE path="prompts/__init__.py">>>
+from pathlib import Path
+
+SYSTEM_PROMPT = (Path(__file__).parent / "system.md").read_text(encoding="utf-8").strip()
+
+__all__ = ["SYSTEM_PROMPT"]
+<<<ENDFILE>>>
+<<<FILE path="prompts/system.md">>>
+You are a professional customer support agent. Your job is to:
+
+1. Read incoming customer emails from Gmail
+2. Extract the customer's email address and their question or issue
+3. Look up their order history in the database using lookup_customer_orders
+4. Draft a helpful reply email that includes their order status and addresses their concern
+5. Create a draft reply (do NOT send it) using gmail_create_draft
+
+Always be professional, courteous, and provide specific order details when available. If a customer has no orders, politely explain that you cannot find their account and suggest they verify their email address.
+
+Start by searching for unread emails, then process each one by looking up customer orders and drafting a response.
+<<<ENDFILE>>>
+<<<FILE path=".env.example">>>
+GMAIL_CLIENT_ID=
+GMAIL_CLIENT_SECRET=
+GMAIL_REFRESH_TOKEN=
+DATABASE_URL=
+<<<ENDFILE>>>
+<<<FILE path="README.md">>>
+# Support Triage
+
+A customer support agent that reads incoming Gmail messages, looks up customer orders in Postgres, and drafts reply emails with order status.
+
+## Setup
+
+1. Install dependencies (handled by host)
+2. Configure environment variables in `.env`:
+   - `GMAIL_CLIENT_ID`: OAuth 2.0 client ID
+   - `GMAIL_CLIENT_SECRET`: OAuth 2.0 client secret
+   - `GMAIL_REFRESH_TOKEN`: OAuth 2.0 refresh token
+   - `DATABASE_URL`: PostgreSQL connection string
+
+## How It Works
+
+The agent:
+1. Searches for unread customer emails
+2. Extracts the customer email and issue
+3. Looks up the customer's order history in the database
+4. Drafts a professional reply with order status and details
+5. Creates the draft for manual review (never sends automatically)
+
+## Tools
+
+- **gmail_search**: Search for unread customer emails
+- **gmail_create_draft**: Create draft replies for manual review
+- **pg_query**: Query customer order data from PostgreSQL
+- **lookup_customer_orders**: Helper to fetch customer orders by email
+<<<ENDFILE>>>

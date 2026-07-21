@@ -1,0 +1,11 @@
+{
+  "agent_id": "example_agent",
+  "name": "Example Agent",
+  "description": "Reference implementation of the Jaroku agent contract. Two utility tools (current time, word count) and a custom state field so the state-diff view has something to show.",
+  "entry": "agent",
+  "schema_version": 1,
+  "connectors": [],
+  "required_env": [],
+  "default_provider": "fake",
+  "hand_written": true
+}

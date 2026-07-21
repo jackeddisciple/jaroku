@@ -93,14 +93,32 @@ def _clean(obj: Any) -> dict:
     return d
 
 
-def emit(kind: str, payload_key: str, obj: Any) -> None:
-    """Serialize one event as a single JSON line to stdout, then flush.
+# The stream events are written to. ``None`` means "use whatever sys.stdout is now",
+# which is the historical behaviour and what the hand-written test_agent relies on.
+#
+# The runner for *generated* agents cannot trust sys.stdout: generated tool code may
+# print(), and one stray byte on the event stream corrupts the trace. It therefore dups
+# the real fd 1, pins it here, and points sys.stdout at stderr — see
+# jaroku_runner.guard.install_stdout_guard. The transport itself is unchanged: still one
+# JSON object per line, still flushed per event.
+_EVENT_STREAM = None
 
-    stdout is reserved exclusively for events; keep all logging on stderr.
+
+def bind_event_stream(stream) -> None:
+    """Pin event output to ``stream`` instead of the live ``sys.stdout``."""
+    global _EVENT_STREAM
+    _EVENT_STREAM = stream
+
+
+def emit(kind: str, payload_key: str, obj: Any) -> None:
+    """Serialize one event as a single JSON line to the event stream, then flush.
+
+    The event stream is reserved exclusively for events; keep all logging on stderr.
     """
     envelope = {"kind": kind, "schema_version": SCHEMA_VERSION, payload_key: _clean(obj)}
-    sys.stdout.write(json.dumps(envelope, default=str) + "\n")
-    sys.stdout.flush()
+    out = _EVENT_STREAM if _EVENT_STREAM is not None else sys.stdout
+    out.write(json.dumps(envelope, default=str) + "\n")
+    out.flush()
 
 
 def emit_run_start(run: Run) -> None:

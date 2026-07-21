@@ -1,0 +1,20 @@
+# Present so the project is export-ready: copy this directory out of Jaroku and it is a
+# standalone uv/pip project. Jaroku itself runs it inside the shared runtime venv and does
+# not read this file.
+[project]
+name = "example-agent"
+version = "0.1.0"
+description = "Reference implementation of the Jaroku agent contract"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=0.3.0"]
+openai = ["langchain-openai>=0.2.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

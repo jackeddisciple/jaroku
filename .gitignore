@@ -12,11 +12,19 @@ dist/
 
 # Data / secrets
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 .env
 .env.*
 !.env.example
+
+# Generated agent projects are runtime output, not source. The hand-written
+# reference agent is kept; everything else (and the staging dir) is ignored.
+runtime/agents/*
+!runtime/agents/__init__.py
+!runtime/agents/example_agent/
 
 # OS / editor
 .DS_Store

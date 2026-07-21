@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { ProcessManager } from "./processManager.ts";
 import { TraceStore } from "./store.ts";
-import { WsRelay, type ClientCommand } from "./wsRelay.ts";
+import { WsRelay, type GenerateCommand, type RunCommand } from "./wsRelay.ts";
+import { Generator } from "./generator.ts";
+import { listAgents } from "./agents.ts";
+import { loadRuntimeEnv } from "./env.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_DIR = resolve(__dirname, "..");
@@ -18,15 +21,24 @@ const RUNTIME_DIR = join(REPO_DIR, "runtime");
 const DB_PATH = process.env.JAROKU_DB ?? join(SERVER_DIR, "jaroku.db");
 const PORT = Number(process.env.JAROKU_PORT ?? 4317);
 
+// Provider + generation keys live in runtime/.env. Names only are logged, never values.
+const loadedKeys = loadRuntimeEnv(join(RUNTIME_DIR, ".env"));
+if (loadedKeys.length) {
+  console.log(`[server] loaded ${loadedKeys.length} var(s) from runtime/.env: ${loadedKeys.sort().join(", ")}`);
+}
+
 const store = new TraceStore(DB_PATH);
 const manager = new ProcessManager();
+const generator = new Generator();
 
 const relay = new WsRelay({
   port: PORT,
   store,
   clientHtmlPath: join(SERVER_DIR, "debug-client.html"),
-  onCommand: (cmd: ClientCommand) => {
-    if (cmd.cmd === "run") runAgent(cmd.input, cmd.provider, cmd.model);
+  listAgents: () => listAgents(RUNTIME_DIR),
+  onCommand: (cmd: RunCommand | GenerateCommand) => {
+    if (cmd.cmd === "run") runAgent(cmd.input, cmd.provider, cmd.model, cmd.agentId);
+    else if (cmd.cmd === "generate") generateAgent(cmd);
   },
 });
 
@@ -63,13 +75,72 @@ manager.on("exit", ({ code, signal }) => {
   console.log(`[manager] agent exited (code=${code} signal=${signal})`);
 });
 
+// --- generation -------------------------------------------------------------
+// Streams into the "gen" channel. Nothing here touches the trace store or the frozen
+// event schema; a generation and a run are independent concerns that share only a socket.
+let generating = false;
+
+function generateAgent(cmd: GenerateCommand): void {
+  if (generating) {
+    relay.broadcastGen({ type: "error", message: "a generation is already in progress" });
+    return;
+  }
+  generating = true;
+  console.log(`[gen] generating — "${cmd.prompt.slice(0, 80)}"`);
+  relay.broadcastGen({ type: "started", prompt: cmd.prompt });
+
+  const onStart = (e: { path: string }) => relay.broadcastGen({ type: "file_start", ...e });
+  const onDelta = (e: { path: string; text: string }) => relay.broadcastGen({ type: "file_delta", ...e });
+  const onEnd = (e: { path: string }) => relay.broadcastGen({ type: "file_end", ...e });
+
+  const cleanup = () => {
+    generating = false;
+    generator.off("file_start", onStart);
+    generator.off("file_delta", onDelta);
+    generator.off("file_end", onEnd);
+    generator.off("done", onDone);
+    generator.off("error", onError);
+  };
+
+  const onDone = (e: { agentId: string; name: string; files: string[]; usage: unknown }) => {
+    const usage = e.usage as { cost_usd?: number; output_tokens?: number };
+    console.log(
+      `[gen] ${e.agentId} ready — ${e.files.length} file(s), ` +
+        `${usage?.output_tokens ?? 0} output tokens, $${(usage?.cost_usd ?? 0).toFixed(5)}`,
+    );
+    relay.broadcastGen({ type: "done", ...e });
+    relay.broadcastAgents();
+    cleanup();
+  };
+
+  const onError = (e: { message: string; problems?: string[] }) => {
+    console.error(`[gen] failed: ${e.message}`);
+    for (const p of e.problems ?? []) console.error(`  - ${p}`);
+    relay.broadcastGen({ type: "error", ...e });
+    cleanup();
+  };
+
+  generator.on("file_start", onStart);
+  generator.on("file_delta", onDelta);
+  generator.on("file_end", onEnd);
+  generator.once("done", onDone);
+  generator.once("error", onError);
+
+  void generator.generate({
+    runtimeDir: RUNTIME_DIR,
+    prompt: cmd.prompt,
+    connectors: cmd.connectors,
+    name: cmd.name,
+  });
+}
+
 // --- run trigger ------------------------------------------------------------
-function runAgent(input?: string, provider?: string, model?: string): void {
+function runAgent(input?: string, provider?: string, model?: string, agentId?: string): void {
   if (manager.running) {
     console.log("[manager] agent already running; ignoring run request");
     return;
   }
-  console.log(`[manager] starting agent${input ? ` — "${input}"` : ""}`);
+  console.log(`[manager] starting ${agentId ?? "test_agent"}${input ? ` — "${input}"` : ""}`);
   // Model is forwarded explicitly so a real-provider run can't silently fall back to
   // the agent's expensive default; unset means the agent picks its own default.
   const env: NodeJS.ProcessEnv = {};
@@ -78,6 +149,7 @@ function runAgent(input?: string, provider?: string, model?: string): void {
   manager.start({
     runtimeDir: RUNTIME_DIR,
     input,
+    agentId,
     env: Object.keys(env).length ? env : undefined,
   });
 }

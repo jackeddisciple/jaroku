@@ -1,8 +1,9 @@
-// WebSocket client for the Jaroku relay. Mirrors the reconnect pattern of the Week-1
+// WebSocket client for the Jaroku relay. Mirrors the reconnect pattern of the original
 // debug-client.html (1s backoff) and dispatches each server message into the trace store.
 // The relay only speaks WebSocket, so this is the single channel between UI and pipeline.
 
 import { useTraceStore } from "../store/traceStore.ts";
+import { useBuildStore } from "../store/buildStore.ts";
 import type { ClientCommand, ServerMessage } from "../types.ts";
 
 const WS_URL = import.meta.env.VITE_JAROKU_WS ?? `ws://localhost:4317`;
@@ -26,6 +27,22 @@ function dispatch(msg: ServerMessage): void {
     case "log":
       s.addLog({ level: msg.level, text: msg.text });
       break;
+    case "agents":
+      useBuildStore.getState().setAgents(msg.agents);
+      break;
+    case "gen": {
+      // Generation is routed to its own store — it never touches trace state.
+      const b = useBuildStore.getState();
+      switch (msg.type) {
+        case "started": b.startGeneration(msg.prompt); break;
+        case "file_start": b.fileStart(msg.path); break;
+        case "file_delta": b.fileDelta(msg.path, msg.text); break;
+        case "file_end": b.fileEnd(msg.path); break;
+        case "done": b.finish(msg.agentId, msg.usage); break;
+        case "error": b.fail(msg.message, msg.problems); break;
+      }
+      break;
+    }
   }
 }
 
@@ -64,10 +81,25 @@ function send(cmd: ClientCommand): void {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(cmd));
 }
 
-export function sendRun(input?: string, provider?: string): void {
-  send({ cmd: "run", input: input || undefined, provider });
+export function sendRun(
+  input?: string,
+  provider?: string,
+  model?: string,
+  agentId?: string,
+): void {
+  // `model` is forwarded now — the relay and index.ts always accepted it, but this client
+  // was dropping it, so a real-provider run silently used the agent's default model.
+  send({ cmd: "run", input: input || undefined, provider, model, agentId });
 }
 
 export function sendLoadRun(runId: string): void {
   send({ cmd: "loadRun", runId });
+}
+
+export function sendGenerate(prompt: string, connectors: string[], name?: string): void {
+  send({ cmd: "generate", prompt, connectors, name });
+}
+
+export function sendListAgents(): void {
+  send({ cmd: "listAgents" });
 }

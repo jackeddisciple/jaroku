@@ -3,7 +3,6 @@ import { orderedSteps, useTraceStore } from "../store/traceStore.ts";
 import type { Step } from "../types.ts";
 import { fmtCost, fmtDuration, fmtTokens } from "../lib/format.ts";
 import { StepRow } from "./StepRow.tsx";
-import { RunTrigger } from "./RunTrigger.tsx";
 
 /** Re-render on an interval while `active` (drives the live "Working Xs" ticker). */
 function useTick(active: boolean, ms = 200): number {
@@ -88,8 +87,6 @@ export function TraceTimeline() {
           </div>
         )}
       </div>
-
-      <RunTrigger />
     </div>
   );
 }

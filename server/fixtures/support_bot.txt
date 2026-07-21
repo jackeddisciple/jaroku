@@ -1,0 +1,96 @@
+<<<FILE path="agent.py">>>
+"""Support agent: looks up orders in Postgres and drafts a reply."""
+from __future__ import annotations
+
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from .prompts import SYSTEM_PROMPT
+from .tools import TOOLS
+
+
+class AgentState(MessagesState):
+    orders: list[str]
+
+
+def build_graph(llm):
+    model = llm.bind_tools(TOOLS)
+
+    def call_model(state: AgentState):
+        messages = state["messages"]
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            messages = [SystemMessage(SYSTEM_PROMPT), *messages]
+        return {"messages": [model.invoke(messages)]}
+
+    def record_orders(state: AgentState):
+        last = state["messages"][-1]
+        orders = list(state.get("orders") or [])
+        if isinstance(last, ToolMessage) and last.name == "pg_query":
+            orders.append(str(last.content)[:200])
+        return {"orders": orders}
+
+    def should_continue(state: AgentState) -> str:
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else END
+
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ToolNode(TOOLS))
+    graph.add_node("record_orders", record_orders)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "record_orders")
+    graph.add_edge("record_orders", "agent")
+    return graph.compile()
+
+
+def build_initial_state(user_input: str) -> dict:
+    return {"messages": [HumanMessage(user_input)], "orders": []}
+<<<ENDFILE>>>
+<<<FILE path="tools/__init__.py">>>
+from .postgres import pg_query
+from .summary import summarize_issue
+
+TOOLS = [pg_query, summarize_issue]
+
+__all__ = ["TOOLS", "pg_query", "summarize_issue"]
+<<<ENDFILE>>>
+<<<FILE path="tools/summary.py">>>
+from __future__ import annotations
+
+from langchain_core.tools import tool
+
+
+@tool
+def summarize_issue(text: str, max_words: int = 40) -> str:
+    """Condense a customer message to its core issue in at most `max_words` words."""
+    words = text.split()
+    if not words:
+        return "The message is empty."
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]) + "..."
+<<<ENDFILE>>>
+<<<FILE path="prompts/__init__.py">>>
+from pathlib import Path
+
+SYSTEM_PROMPT = (Path(__file__).parent / "system.md").read_text(encoding="utf-8").strip()
+
+__all__ = ["SYSTEM_PROMPT"]
+<<<ENDFILE>>>
+<<<FILE path="prompts/system.md">>>
+You are a customer support assistant.
+
+Look up order status with `pg_query` against the orders table. Use `summarize_issue` to
+condense long customer messages before replying. Be brief and factual.
+<<<ENDFILE>>>
+<<<FILE path=".env.example">>>
+# Postgres connection used by pg_query
+DATABASE_URL=
+<<<ENDFILE>>>
+<<<FILE path="README.md">>>
+# Support Bot
+
+Looks up orders in Postgres and drafts concise replies.
+<<<ENDFILE>>>

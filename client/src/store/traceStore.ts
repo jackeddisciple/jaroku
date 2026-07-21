@@ -1,4 +1,4 @@
-// The trace store — the correctness core of Week 2 (the 🟡 review point).
+// The trace store — the correctness core of the timeline (the 🟡 review point).
 //
 // Invariants that keep the trace honest (README §10.3 "a corrupted trace is a lying product"):
 //   1. Steps are keyed by step.id, so at-least-once re-delivery is idempotent (no duplicates).
