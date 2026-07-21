@@ -8,7 +8,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { TraceStore } from "./store.ts";
 import type { TraceEvent } from "./types.ts";
 
-export type RunCommand = { cmd: "run"; input?: string; provider?: string };
+export type RunCommand = { cmd: "run"; input?: string; provider?: string; model?: string };
 export type LoadRunCommand = { cmd: "loadRun"; runId: string };
 export type ClientCommand = RunCommand | LoadRunCommand;
 

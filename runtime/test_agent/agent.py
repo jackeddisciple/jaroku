@@ -26,7 +26,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from jaroku_interceptor import JarokuTracer, Run
+from jaroku_interceptor import JarokuTracer, Run, load_env
 from jaroku_interceptor.schema import emit_run_end, emit_run_start, now_iso
 
 
@@ -125,6 +125,10 @@ def build_graph(model):
 
 # --------------------------------------------------------------------------- main
 def main() -> int:
+    # Provider keys live in runtime/.env — the subprocess doesn't inherit a shell rc.
+    # Shell env always wins over the file; values are never logged.
+    load_env()
+
     user_input = sys.argv[1] if len(sys.argv) > 1 else \
         "What's the weather in Paris, and what is 18 + 4?"
 

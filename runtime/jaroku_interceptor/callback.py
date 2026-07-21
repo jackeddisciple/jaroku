@@ -45,9 +45,12 @@ from .schema import Run, Step, emit_step
 # Rough per-token USD pricing (input, output) for cost estimation. Extend as providers grow.
 # Numbers are per single token (i.e. per-million-price / 1_000_000).
 _PRICING = {
-    "claude-opus-4-8": (15e-6, 75e-6),
+    # Anthropic list prices, USD per 1M tokens / 1e6. Verified 2026-07-21.
+    "claude-opus-4-8": (5e-6, 25e-6),
+    "claude-opus-4-7": (5e-6, 25e-6),
     "claude-sonnet-5": (3e-6, 15e-6),
-    "claude-haiku-4-5": (0.8e-6, 4e-6),
+    "claude-sonnet-4-6": (3e-6, 15e-6),
+    "claude-haiku-4-5": (1e-6, 5e-6),
     "gpt-4o": (2.5e-6, 10e-6),
     "gpt-4o-mini": (0.15e-6, 0.6e-6),
 }

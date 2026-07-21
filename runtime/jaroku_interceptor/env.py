@@ -1,0 +1,67 @@
+"""Minimal .env loader — no third-party dependency.
+
+The agent runs as a subprocess spawned by the Node process manager, which does not
+inherit the developer's shell rc files. Provider keys therefore have to come from
+``runtime/.env``. Precedence: a variable already present in the environment always
+wins, so ``JAROKU_PROVIDER=anthropic uv run ...`` and CI secrets still override the file.
+
+Never logs values — only the *names* of the keys it set, and only to stderr.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# runtime/jaroku_interceptor/env.py -> runtime/.env
+DEFAULT_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _parse_line(line: str) -> tuple[str, str] | None:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    key, sep, value = line.partition("=")
+    if not sep:
+        return None
+    key = key.strip()
+    if not key:
+        return None
+    value = value.strip()
+    # Strip one layer of matching quotes, if present.
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return key, value
+
+
+def load_env(path: Path | None = None, *, verbose: bool = True) -> list[str]:
+    """Load KEY=VALUE pairs from ``path`` into os.environ. Returns the names set.
+
+    Existing environment variables are never overwritten. Missing/unreadable files
+    are not an error — the fake provider needs no keys at all.
+    """
+    env_path = Path(path) if path is not None else DEFAULT_ENV_PATH
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    loaded: list[str] = []
+    for line in text.splitlines():
+        parsed = _parse_line(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        if key in os.environ:
+            continue
+        os.environ[key] = value
+        loaded.append(key)
+
+    if verbose and loaded:
+        # Names only — a value must never reach stdout, stderr, or the trace.
+        print(f"[jaroku] loaded {len(loaded)} var(s) from {env_path.name}: "
+              f"{', '.join(sorted(loaded))}", file=sys.stderr, flush=True)
+    return loaded

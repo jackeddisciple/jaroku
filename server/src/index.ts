@@ -26,7 +26,7 @@ const relay = new WsRelay({
   store,
   clientHtmlPath: join(SERVER_DIR, "debug-client.html"),
   onCommand: (cmd: ClientCommand) => {
-    if (cmd.cmd === "run") runAgent(cmd.input, cmd.provider);
+    if (cmd.cmd === "run") runAgent(cmd.input, cmd.provider, cmd.model);
   },
 });
 
@@ -64,16 +64,21 @@ manager.on("exit", ({ code, signal }) => {
 });
 
 // --- run trigger ------------------------------------------------------------
-function runAgent(input?: string, provider?: string): void {
+function runAgent(input?: string, provider?: string, model?: string): void {
   if (manager.running) {
     console.log("[manager] agent already running; ignoring run request");
     return;
   }
   console.log(`[manager] starting agent${input ? ` — "${input}"` : ""}`);
+  // Model is forwarded explicitly so a real-provider run can't silently fall back to
+  // the agent's expensive default; unset means the agent picks its own default.
+  const env: NodeJS.ProcessEnv = {};
+  if (provider) env.JAROKU_PROVIDER = provider;
+  if (model) env.JAROKU_MODEL = model;
   manager.start({
     runtimeDir: RUNTIME_DIR,
     input,
-    env: provider ? { JAROKU_PROVIDER: provider } : undefined,
+    env: Object.keys(env).length ? env : undefined,
   });
 }
 
