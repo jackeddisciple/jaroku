@@ -1,0 +1,4 @@
+Made gmail search return only unread mail.
+<<<FILE path="tools/gmail.py">>>
+# this must be rejected before a byte is accepted — reviewed connector template
+<<<ENDFILE>>>

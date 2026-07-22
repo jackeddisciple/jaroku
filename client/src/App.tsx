@@ -5,12 +5,23 @@ import { BuildPane } from "./components/BuildPane.tsx";
 import { RightPanel } from "./components/RightPanel.tsx";
 import { RunTrigger } from "./components/RunTrigger.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { startSocket } from "./lib/socket.ts";
+import { sendLoadAgentFiles, startSocket } from "./lib/socket.ts";
+import { useBuildStore } from "./store/buildStore.ts";
+import { useTraceStore } from "./store/traceStore.ts";
 
 export function App() {
+  const activeAgentId = useBuildStore((s) => s.activeAgentId);
+  const connected = useTraceStore((s) => s.connection === "open");
+
   useEffect(() => {
     startSocket();
   }, []);
+
+  // Selecting an agent loads its current on-disk files into the Code tab. Also re-fires
+  // on reconnect, so a server restart doesn't leave a stale view.
+  useEffect(() => {
+    if (activeAgentId && connected) sendLoadAgentFiles(activeAgentId);
+  }, [activeAgentId, connected]);
 
   return (
     <div className="flex h-full flex-col">

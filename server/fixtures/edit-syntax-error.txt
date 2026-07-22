@@ -1,0 +1,7 @@
+Broke the tool on purpose (regression fixture for post-edit validation).
+<<<FILE path="tools/weather.py">>>
+from __future__ import annotations
+
+def get_weather(city: str -> str:
+    return "syntax error above: unclosed paren in signature"
+<<<ENDFILE>>>

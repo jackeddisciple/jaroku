@@ -23,7 +23,31 @@ export type GenerateCommand = {
   name?: string;
 };
 export type ListAgentsCommand = { cmd: "listAgents" };
-export type ClientCommand = RunCommand | LoadRunCommand | GenerateCommand | ListAgentsCommand;
+// The fix loop (doc §8 Week 4): every mutation is proposal -> explicit apply/undo.
+export type EditCommand = { cmd: "edit"; agentId: string; instruction: string };
+export type ApplyEditCommand = { cmd: "applyEdit"; proposalId: string };
+export type UndoEditCommand = { cmd: "undoEdit"; agentId: string };
+export type DiscardEditCommand = { cmd: "discardEdit"; proposalId: string };
+export type LoadAgentFilesCommand = { cmd: "loadAgentFiles"; agentId: string };
+export type ClientCommand =
+  | RunCommand
+  | LoadRunCommand
+  | GenerateCommand
+  | ListAgentsCommand
+  | EditCommand
+  | ApplyEditCommand
+  | UndoEditCommand
+  | DiscardEditCommand
+  | LoadAgentFilesCommand;
+
+/** Commands the relay forwards to the app rather than answering locally. */
+export type ForwardedCommand =
+  | RunCommand
+  | GenerateCommand
+  | EditCommand
+  | ApplyEditCommand
+  | UndoEditCommand
+  | DiscardEditCommand;
 
 // Generation rides its own channel, deliberately parallel to "trace". It never enters the
 // trace store or the event schema — schema/events.md v1 stays frozen.
@@ -35,20 +59,34 @@ export type GenEvent =
   | { type: "done"; agentId: string; name: string; files: string[]; usage: unknown }
   | { type: "error"; message: string; problems?: string[] };
 
+// Editing rides its own channel too, parallel to "gen" — it never enters the trace store
+// or the frozen event schema either. Payload shapes are owned by editor.ts.
+export type EditEvent =
+  | { type: "started"; agentId: string; instruction: string }
+  | { type: "file_start"; path: string }
+  | { type: "file_delta"; path: string; text: string }
+  | { type: "file_end"; path: string }
+  | { type: "proposal"; proposalId: string; agentId: string; instruction: string; summary: string; files: unknown[]; usage: unknown }
+  | { type: "applied"; proposalId: string; agentId: string; version: number; summary: string }
+  | { type: "undone"; agentId: string; version: number; summary: string }
+  | { type: "discarded"; proposalId: string; agentId: string }
+  | { type: "error"; message: string; problems?: string[]; agentId?: string; proposalId?: string };
+
 export interface RelayOptions {
   port: number;
   store: TraceStore;
   clientHtmlPath: string;
-  // "loadRun" and "listAgents" are answered locally; the rest are forwarded.
-  onCommand?: (cmd: RunCommand | GenerateCommand) => void;
+  // "loadRun", "listAgents" and "loadAgentFiles" are answered locally; the rest are forwarded.
+  onCommand?: (cmd: ForwardedCommand) => void;
   listAgents?: () => unknown[];
+  listAgentFiles?: (agentId: string) => unknown[];
 }
 
 export class WsRelay {
   private wss: WebSocketServer;
   private clients = new Set<WebSocket>();
   private store: TraceStore;
-  private onCommand?: (cmd: RunCommand | GenerateCommand) => void;
+  private onCommand?: (cmd: ForwardedCommand) => void;
 
   constructor(private opts: RelayOptions) {
     this.store = opts.store;
@@ -71,6 +109,20 @@ export class WsRelay {
             this.onCommand?.(msg);
           } else if (msg.cmd === "generate" && typeof msg.prompt === "string") {
             this.onCommand?.(msg);
+          } else if (msg.cmd === "edit" && typeof msg.agentId === "string" && typeof msg.instruction === "string") {
+            this.onCommand?.(msg);
+          } else if (msg.cmd === "applyEdit" && typeof msg.proposalId === "string") {
+            this.onCommand?.(msg);
+          } else if (msg.cmd === "undoEdit" && typeof msg.agentId === "string") {
+            this.onCommand?.(msg);
+          } else if (msg.cmd === "discardEdit" && typeof msg.proposalId === "string") {
+            this.onCommand?.(msg);
+          } else if (msg.cmd === "loadAgentFiles" && typeof msg.agentId === "string") {
+            this.sendTo(ws, {
+              channel: "agentFiles",
+              agentId: msg.agentId,
+              files: this.opts.listAgentFiles?.(msg.agentId) ?? [],
+            });
           } else if (msg.cmd === "listAgents") {
             this.sendTo(ws, { channel: "agents", agents: this.opts.listAgents?.() ?? [] });
           } else if (msg.cmd === "loadRun" && typeof msg.runId === "string") {
@@ -131,6 +183,27 @@ export class WsRelay {
   // Broadcast a generation event. Separate channel from "trace" by design.
   broadcastGen(event: GenEvent): void {
     const msg = JSON.stringify({ channel: "gen", ...event });
+    for (const ws of this.clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+  }
+
+  // Broadcast an edit-flow event. Separate channel from "trace" and "gen" by design.
+  broadcastEdit(event: EditEvent): void {
+    const msg = JSON.stringify({ channel: "edit", ...event });
+    for (const ws of this.clients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+  }
+
+  // Push an agent's current on-disk files to everyone (after an apply or undo, so the
+  // Code tab reflects what will actually run).
+  broadcastAgentFiles(agentId: string): void {
+    const msg = JSON.stringify({
+      channel: "agentFiles",
+      agentId,
+      files: this.opts.listAgentFiles?.(agentId) ?? [],
+    });
     for (const ws of this.clients) {
       if (ws.readyState === WebSocket.OPEN) ws.send(msg);
     }

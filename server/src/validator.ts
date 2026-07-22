@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 export interface ValidationResult {
   ok: boolean;
@@ -164,6 +164,88 @@ print(json.dumps(problems))
   });
 }
 
+/**
+ * Actually import the staged project, exactly as jaroku_runner will at run time.
+ *
+ * ast.parse only proves the file PARSES. A real generation shipped
+ * `class AgentState(StateGraph.__bases__[0] ...)` — syntactically valid, but
+ * "TypeError: Cannot inherit from plain Generic" the moment the module is imported, so
+ * every run died at step 0 while validation had waved it through. Importing is the only
+ * honest check for that class of defect (bad base classes, top-level exceptions, names
+ * imported but never defined). Post-import we also verify the contract symbols are the
+ * right kind of thing, mirroring jaroku_runner/contract.py.
+ *
+ * The import executes the project's top-level code — the same code the runner would
+ * execute seconds later — inside the same uv venv, with stdout captured so a violation
+ * of rule 3 at import time surfaces here instead of corrupting the event stream.
+ */
+function importCheck(runtimeDir: string, projectDir: string): Promise<string[]> {
+  const script = `
+import contextlib, importlib, io, json, os, sys, traceback
+
+parent, module_name = sys.argv[1], sys.argv[2]
+sys.path.insert(0, parent)
+project_root = os.path.join(parent, module_name)
+problems = []
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf):
+        mod = importlib.import_module(module_name + ".agent")
+except BaseException as exc:
+    loc = ""
+    for frame in traceback.extract_tb(exc.__traceback__):
+        if frame.filename.startswith(project_root):
+            loc = f" ({os.path.relpath(frame.filename, project_root)}:{frame.lineno})"
+    problems.append(
+        f"the project fails to import{loc}: {type(exc).__name__}: {exc} — "
+        "emit only final, working code (rule 11)"
+    )
+else:
+    if not isinstance(getattr(mod, "TOOLS", None), (list, tuple)):
+        problems.append("after import, TOOLS is missing or not a list")
+    if not callable(getattr(mod, "build_graph", None)):
+        problems.append("after import, build_graph is missing or not callable")
+    if not callable(getattr(mod, "build_initial_state", None)):
+        problems.append("after import, build_initial_state is missing or not callable")
+out = buf.getvalue().strip()
+if out:
+    problems.append("importing the project wrote to stdout (rule 3): " + out[:120])
+print(json.dumps(problems))
+`.trim();
+
+  return new Promise((resolve) => {
+    const child = spawn(
+      "uv",
+      ["run", "python", "-c", script, dirname(projectDir), basename(projectDir)],
+      {
+        cwd: runtimeDir,
+        env: { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH ?? ""}` },
+      },
+    );
+    // Top-level code can loop forever; a hung import must reject, not hang validation.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve(["the project's import timed out after 20s — top-level code must not block"]);
+    }, 20_000);
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve([`could not run the import check: ${e.message}`]);
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(out.trim() || "[]"));
+      } catch {
+        resolve([`import check failed to report: ${err.slice(0, 300)}`]);
+      }
+    });
+  });
+}
+
 export async function validateProject(
   projectDir: string,
   opts: { runtimeDir: string; connectorFiles: string[]; connectorToolNames?: string[] },
@@ -226,6 +308,13 @@ export async function validateProject(
       opts.connectorFiles,
     )),
   );
+
+  // --- the project must actually import -------------------------------------
+  // Only reached when every cheaper check passed: we never execute code that is
+  // already known to be bad, and a syntax error isn't reported twice.
+  if (problems.length === 0) {
+    problems.push(...(await importCheck(opts.runtimeDir, projectDir)));
+  }
 
   return { ok: problems.length === 0, problems };
 }

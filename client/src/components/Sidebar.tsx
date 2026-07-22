@@ -83,12 +83,23 @@ function AgentRow({ agent }: { agent: AgentSummary }) {
 export function Sidebar() {
   const runs = useTraceStore((s) => s.runs);
   const agents = useBuildStore((s) => s.agents);
+  const activeAgentId = useBuildStore((s) => s.activeAgentId);
+  const selectAgent = useBuildStore((s) => s.selectAgent);
   const list = orderedRuns(runs);
 
   return (
     <div className="flex h-full flex-col bg-panel">
-      <div className="px-4 py-3 shrink-0 flex items-center">
+      <div className="px-4 py-3 shrink-0 flex items-center gap-2">
         <span className="text-[11px] uppercase tracking-widest text-faint">Agents</span>
+        <button
+          onClick={() => selectAgent(null)}
+          title="Describe a new agent"
+          className={`text-[11px] rounded px-1.5 py-0.5 transition-colors ${
+            activeAgentId === null ? "bg-active text-ink" : "text-muted hover:text-ink"
+          }`}
+        >
+          + new
+        </button>
         <span className="ml-auto text-faint text-[11px]">{agents.length}</span>
       </div>
       <div className="max-h-[40%] overflow-auto shrink-0">

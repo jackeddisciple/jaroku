@@ -10,7 +10,7 @@
 //     the file). Streaming stays fast; the highlight lands the moment the file closes.
 
 import { useEffect, useState } from "react";
-import { useBuildStore } from "../store/buildStore.ts";
+import { orderedFiles, useBuildStore } from "../store/buildStore.ts";
 
 const LANGS = ["python", "json", "markdown", "toml"] as const;
 const THEME = "vitesse-dark"; // muted, close to the app's near-black palette
@@ -34,6 +34,42 @@ function langFor(path: string): string {
   if (path.endsWith(".md")) return "markdown";
   if (path.endsWith(".toml")) return "toml";
   return "text";
+}
+
+// Slim file rail — the switcher that used to be BuildPane's FileTree before the center
+// pane became the conversation (fix loop). Same row styling as the old tree.
+function FileRail() {
+  const files = useBuildStore((s) => s.files);
+  const fileOrder = useBuildStore((s) => s.fileOrder);
+  const activeFile = useBuildStore((s) => s.activeFile);
+  const streamingFile = useBuildStore((s) => s.streamingFile);
+  const selectFile = useBuildStore((s) => s.selectFile);
+  const list = orderedFiles({ files, fileOrder });
+
+  if (list.length < 2) return null;
+
+  return (
+    <div className="w-48 shrink-0 overflow-y-auto border-r border-hair py-1">
+      {list.map((f) => {
+        const active = f.path === activeFile;
+        return (
+          <button
+            key={f.path}
+            onClick={() => selectFile(f.path)}
+            title={f.readOnly ? `${f.path} (read-only)` : f.path}
+            className={`relative w-full text-left px-3 py-1.5 text-[11px] transition-colors truncate ${
+              active ? "bg-active text-ink" : "text-muted hover:text-ink"
+            }`}
+          >
+            {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 bg-ink" />}
+            {f.path === streamingFile && <span className="text-run animate-pulse">● </span>}
+            {f.path}
+            {f.readOnly && <span className="text-faint"> ⌀</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function CodeViewer() {
@@ -73,22 +109,26 @@ export function CodeViewer() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 px-6 py-2 shrink-0 border-b border-hair">
-        <span className="text-ink text-[12px] truncate">{file.path}</span>
-        <span className="text-faint text-[11px] shrink-0">{lang}</span>
-        {!complete && <span className="text-run text-[11px] animate-pulse shrink-0">writing…</span>}
-        <span className="ml-auto text-faint text-[11px] shrink-0 tabular-nums">
-          {content.split("\n").length} lines
-        </span>
-      </div>
+    <div className="flex h-full min-h-0">
+      <FileRail />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2 px-6 py-2 shrink-0 border-b border-hair">
+          <span className="text-ink text-[12px] truncate">{file.path}</span>
+          <span className="text-faint text-[11px] shrink-0">{lang}</span>
+          {file.readOnly && <span className="text-faint text-[11px] shrink-0">read-only</span>}
+          {!complete && <span className="text-run text-[11px] animate-pulse shrink-0">writing…</span>}
+          <span className="ml-auto text-faint text-[11px] shrink-0 tabular-nums">
+            {content.split("\n").length} lines
+          </span>
+        </div>
 
-      <div className="flex-1 overflow-auto px-6 py-4 text-[12px] leading-relaxed">
-        {html ? (
-          <div className="shiki-host [&_pre]:!bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
-        ) : (
-          <pre className="whitespace-pre text-ink">{content}</pre>
-        )}
+        <div className="flex-1 overflow-auto px-6 py-4 text-[12px] leading-relaxed">
+          {html ? (
+            <div className="shiki-host [&_pre]:!bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
+          ) : (
+            <pre className="whitespace-pre text-ink">{content}</pre>
+          )}
+        </div>
       </div>
     </div>
   );

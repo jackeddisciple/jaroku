@@ -59,6 +59,7 @@ export interface AgentSummary {
   created_at: string | null;
   hand_written: boolean;
   runnable: boolean;
+  edit_count?: number; // applied edits available to undo (fix loop)
 }
 
 export interface GenUsage {
@@ -77,6 +78,42 @@ export type GenMessage =
   | { channel: "gen"; type: "done"; agentId: string; name: string; files: string[]; usage: GenUsage }
   | { channel: "gen"; type: "error"; message: string; problems?: string[] };
 
+// --- editing (fix loop) ---
+// Like generation: its own channel, never part of the frozen event schema.
+
+export interface FileDiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[]; // " ctx" | "+added" | "-removed"
+}
+
+export interface FileDiff {
+  path: string;
+  status: "added" | "modified";
+  additions: number;
+  deletions: number;
+  hunks: FileDiffHunk[];
+}
+
+export interface AgentFile {
+  path: string;
+  content: string;
+  readOnly: boolean;
+}
+
+export type EditMessage =
+  | { channel: "edit"; type: "started"; agentId: string; instruction: string }
+  | { channel: "edit"; type: "file_start"; path: string }
+  | { channel: "edit"; type: "file_delta"; path: string; text: string }
+  | { channel: "edit"; type: "file_end"; path: string }
+  | { channel: "edit"; type: "proposal"; proposalId: string; agentId: string; instruction: string; summary: string; files: FileDiff[]; usage: GenUsage }
+  | { channel: "edit"; type: "applied"; proposalId: string; agentId: string; version: number; summary: string }
+  | { channel: "edit"; type: "undone"; agentId: string; version: number; summary: string }
+  | { channel: "edit"; type: "discarded"; proposalId: string; agentId: string }
+  | { channel: "edit"; type: "error"; message: string; problems?: string[]; agentId?: string; proposalId?: string };
+
 // --- server → client channel messages (see server/src/wsRelay.ts) ---
 
 export type ServerMessage =
@@ -85,7 +122,9 @@ export type ServerMessage =
   | { channel: "runSteps"; runId: string; steps: Step[] }
   | { channel: "log"; level: "stderr" | "parseError"; text: string }
   | { channel: "agents"; agents: AgentSummary[] }
-  | GenMessage;
+  | { channel: "agentFiles"; agentId: string; files: AgentFile[] }
+  | GenMessage
+  | EditMessage;
 
 // --- client → server commands ---
 
@@ -93,4 +132,9 @@ export type ClientCommand =
   | { cmd: "run"; input?: string; provider?: string; model?: string; agentId?: string }
   | { cmd: "loadRun"; runId: string }
   | { cmd: "generate"; prompt: string; connectors?: string[]; name?: string }
-  | { cmd: "listAgents" };
+  | { cmd: "listAgents" }
+  | { cmd: "edit"; agentId: string; instruction: string }
+  | { cmd: "applyEdit"; proposalId: string }
+  | { cmd: "undoEdit"; agentId: string }
+  | { cmd: "discardEdit"; proposalId: string }
+  | { cmd: "loadAgentFiles"; agentId: string };

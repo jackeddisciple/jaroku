@@ -4,6 +4,7 @@
 
 import { useTraceStore } from "../store/traceStore.ts";
 import { useBuildStore } from "../store/buildStore.ts";
+import { useChatStore } from "../store/chatStore.ts";
 import type { ClientCommand, ServerMessage } from "../types.ts";
 
 const WS_URL = import.meta.env.VITE_JAROKU_WS ?? `ws://localhost:4317`;
@@ -30,16 +31,39 @@ function dispatch(msg: ServerMessage): void {
     case "agents":
       useBuildStore.getState().setAgents(msg.agents);
       break;
+    case "agentFiles":
+      useBuildStore.getState().setAgentFiles(msg.agentId, msg.files);
+      break;
     case "gen": {
       // Generation is routed to its own store — it never touches trace state.
+      // Lifecycle events are mirrored into the conversation (chatStore); the file
+      // streaming itself stays in buildStore only.
       const b = useBuildStore.getState();
+      const c = useChatStore.getState();
       switch (msg.type) {
-        case "started": b.startGeneration(msg.prompt); break;
+        case "started": b.startGeneration(msg.prompt); c.genStarted(msg.prompt); break;
         case "file_start": b.fileStart(msg.path); break;
         case "file_delta": b.fileDelta(msg.path, msg.text); break;
         case "file_end": b.fileEnd(msg.path); break;
-        case "done": b.finish(msg.agentId, msg.usage); break;
-        case "error": b.fail(msg.message, msg.problems); break;
+        case "done": b.finish(msg.agentId, msg.usage); c.genDone(msg.agentId, msg.files, msg.usage); break;
+        case "error": b.fail(msg.message, msg.problems); c.genError(msg.message, msg.problems); break;
+      }
+      break;
+    }
+    case "edit": {
+      // The fix loop lives in the conversation — it never touches trace or build state
+      // (the post-apply file refresh arrives separately on "agentFiles").
+      const c = useChatStore.getState();
+      switch (msg.type) {
+        case "started": c.editStarted(msg.agentId, msg.instruction); break;
+        case "file_start": c.editFileStart(msg.path); break;
+        case "file_delta": c.editFileDelta(msg.path, msg.text.length); break;
+        case "file_end": c.editFileEnd(msg.path); break;
+        case "proposal": c.proposal(msg); break;
+        case "applied": c.applied(msg.proposalId, msg.agentId, msg.version); break;
+        case "undone": c.undone(msg.agentId, msg.version, msg.summary); break;
+        case "discarded": c.discarded(msg.proposalId, msg.agentId); break;
+        case "error": c.editError(msg); break;
       }
       break;
     }
@@ -102,4 +126,26 @@ export function sendGenerate(prompt: string, connectors: string[], name?: string
 
 export function sendListAgents(): void {
   send({ cmd: "listAgents" });
+}
+
+// --- fix loop -------------------------------------------------------------
+
+export function sendEdit(agentId: string, instruction: string): void {
+  send({ cmd: "edit", agentId, instruction });
+}
+
+export function sendApplyEdit(proposalId: string): void {
+  send({ cmd: "applyEdit", proposalId });
+}
+
+export function sendUndoEdit(agentId: string): void {
+  send({ cmd: "undoEdit", agentId });
+}
+
+export function sendDiscardEdit(proposalId: string): void {
+  send({ cmd: "discardEdit", proposalId });
+}
+
+export function sendLoadAgentFiles(agentId: string): void {
+  send({ cmd: "loadAgentFiles", agentId });
 }

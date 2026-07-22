@@ -29,6 +29,9 @@ export class FileProtocolParser {
   private buf = "";
   private current: string | null = null;
   private seen: string[] = [];
+  // Text outside file blocks. Generation forbids it (and ignores it); the edit protocol
+  // uses the line before the first block as the change summary.
+  private proseParts: string[] = [];
   // Set right after an opening delimiter: the first content character may be the newline
   // that terminated that delimiter line, and belongs to the protocol, not the file.
   private stripLeadingNewline = false;
@@ -43,6 +46,11 @@ export class FileProtocolParser {
     return [...this.seen];
   }
 
+  /** Everything the model wrote outside file blocks, in order. Complete only after finish(). */
+  get prose(): string {
+    return this.proseParts.join("");
+  }
+
   push(chunk: string): void {
     this.buf += chunk;
 
@@ -50,15 +58,18 @@ export class FileProtocolParser {
       if (this.current === null) {
         const match = OPEN_RE.exec(this.buf);
         if (!match) {
-          // Prose outside a file block is discarded (the prompt forbids it), but keep a
-          // tail that could be the start of an opening delimiter split across chunks.
+          // Prose outside a file block is captured (the edit flow reads it as the summary
+          // line; generation ignores it), keeping a tail that could be the start of an
+          // opening delimiter split across chunks.
           if (this.buf.length > MAX_PARTIAL) {
+            this.proseParts.push(this.buf.slice(0, this.buf.length - MAX_PARTIAL));
             this.buf = this.buf.slice(this.buf.length - MAX_PARTIAL);
           }
           return;
         }
         this.current = match[1]!;
         this.seen.push(this.current);
+        if (match.index > 0) this.proseParts.push(this.buf.slice(0, match.index));
         this.buf = this.buf.slice(match.index + match[0].length);
         this.stripLeadingNewline = true;
         this.emit({ type: "file_start", path: this.current });
@@ -93,12 +104,21 @@ export class FileProtocolParser {
     }
   }
 
-  /** Call when the model stream ends. Returns an error string if a file was left open. */
-  finish(): string | null {
+  /**
+   * Call when the model stream ends. Returns an error string if a file was left open.
+   * `allowEmpty` accepts a zero-file response (a valid "no-op" edit — the summary line
+   * explains why); generation keeps treating it as an error.
+   */
+  finish(opts?: { allowEmpty?: boolean }): string | null {
     if (this.current !== null) {
       return `stream ended inside ${this.current} (no ${CLOSE}) — generation was truncated`;
     }
-    if (this.seen.length === 0) return "the model produced no files";
+    // Whatever is left in the buffer is trailing prose, not a partial delimiter.
+    if (this.buf) {
+      this.proseParts.push(this.buf);
+      this.buf = "";
+    }
+    if (this.seen.length === 0 && !opts?.allowEmpty) return "the model produced no files";
     return null;
   }
 }

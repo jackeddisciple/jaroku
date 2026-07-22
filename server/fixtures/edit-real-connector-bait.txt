@@ -1,0 +1,1 @@
+Cannot modify tools/postgres.py — it is a read-only connector file. If the request requires different connector behavior, write a bespoke wrapper tool instead. The postgres connector enforces read-only SELECT by design and rejects UPDATE statements at the statement check and transaction level.

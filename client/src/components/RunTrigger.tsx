@@ -7,10 +7,14 @@
 // Fake is the default on purpose: the free path exercises every generated tool and costs
 // nothing, so the reflex of pressing Run is never expensive.
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTraceStore } from "../store/traceStore.ts";
 import { useBuildStore } from "../store/buildStore.ts";
 import { sendRun } from "../lib/socket.ts";
+
+// Test-input persistence (doc §4.7.6): the fix loop means re-running 10–20 times per
+// session — the last input per agent is remembered, and R re-runs it instantly.
+const inputKey = (agentId: string | null) => `jaroku.input.${agentId ?? "_"}`;
 
 const PROVIDERS = [
   { id: "fake", label: "Dry run (free)", models: ["fake-dry-run"] },
@@ -36,11 +40,31 @@ export function RunTrigger() {
     setModel(PROVIDERS.find((p) => p.id === id)?.models[0] ?? "");
   };
 
-  const submit = () => {
+  // Restore the remembered input when the agent selection changes.
+  useEffect(() => {
+    setInput(localStorage.getItem(inputKey(activeAgentId)) ?? "");
+  }, [activeAgentId]);
+
+  const submit = useCallback(() => {
     if (!canRun) return;
+    localStorage.setItem(inputKey(activeAgentId), input);
     // provider "fake" still forwards explicitly — the runner should never have to guess.
     sendRun(input.trim(), provider, model, activeAgentId ?? undefined);
-  };
+  }, [canRun, input, provider, model, activeAgentId]);
+
+  // R re-runs (doc §4.5) when focus isn't in a field — the fix loop's fastest gesture.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "r" && e.key !== "R") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      e.preventDefault();
+      submit();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [submit]);
 
   const select =
     "bg-panel text-ink text-[12px] rounded px-2 py-2 outline-none focus:ring-1 focus:ring-[#2a2a2e] cursor-pointer";

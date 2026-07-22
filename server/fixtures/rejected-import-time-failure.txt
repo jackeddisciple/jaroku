@@ -1,0 +1,89 @@
+<<<FILE path="agent.py">>>
+"""Regression fixture: syntactically valid, fails at IMPORT time.
+
+A real haiku generation left this false start in the file: a class deriving its base from
+StateGraph.__bases__[0], which resolves to typing.Generic and raises
+"TypeError: Cannot inherit from plain Generic" the moment the module is imported.
+ast.parse accepts it, so only the validator's import check can reject it.
+"""
+from __future__ import annotations
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from .prompts import SYSTEM_PROMPT
+from .tools import TOOLS
+
+
+class AgentState(StateGraph.__bases__[0] if hasattr(StateGraph, '__bases__') else dict):
+    """Abandoned first attempt the model failed to clean up."""
+    pass
+
+
+class TodoState(MessagesState):
+    tasks: list[dict]
+
+
+def build_graph(llm):
+    model = llm.bind_tools(TOOLS)
+
+    def call_model(state: TodoState):
+        messages = state["messages"]
+        if not any(isinstance(m, SystemMessage) for m in messages):
+            messages = [SystemMessage(SYSTEM_PROMPT), *messages]
+        return {"messages": [model.invoke(messages)]}
+
+    def should_continue(state: TodoState) -> str:
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else END
+
+    graph = StateGraph(TodoState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ToolNode(TOOLS))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
+    return graph.compile()
+
+
+def build_initial_state(user_input: str) -> dict:
+    return {"messages": [HumanMessage(user_input)], "tasks": []}
+<<<ENDFILE>>>
+<<<FILE path="tools/__init__.py">>>
+from .todo import add_task
+
+TOOLS = [add_task]
+
+__all__ = ["TOOLS", "add_task"]
+<<<ENDFILE>>>
+<<<FILE path="tools/todo.py">>>
+from __future__ import annotations
+
+from langchain_core.tools import tool
+
+_tasks: list[dict] = []
+
+
+@tool
+def add_task(title: str) -> str:
+    """Add a new task to the todo list."""
+    _tasks.append({"id": len(_tasks) + 1, "title": title, "done": False})
+    return f"Added task #{len(_tasks)}: {title}"
+<<<ENDFILE>>>
+<<<FILE path="prompts/__init__.py">>>
+from pathlib import Path
+
+SYSTEM_PROMPT = (Path(__file__).parent / "system.md").read_text(encoding="utf-8").strip()
+
+__all__ = ["SYSTEM_PROMPT"]
+<<<ENDFILE>>>
+<<<FILE path="prompts/system.md">>>
+You are a todo list assistant.
+<<<ENDFILE>>>
+<<<FILE path=".env.example">>>
+# This agent needs no credentials.
+<<<ENDFILE>>>
+<<<FILE path="README.md">>>
+Regression fixture for the validator's import check.
+<<<ENDFILE>>>

@@ -1,0 +1,57 @@
+Added a units argument so temperatures can be reported in Celsius or Fahrenheit.
+<<<FILE path="tools/weather.py">>>
+from __future__ import annotations
+
+import os
+import sys
+
+from langchain_core.tools import tool
+
+
+@tool
+def get_weather(city: str, country: str = "", units: str = "metric") -> str:
+    """Get the current weather for a city. Optionally include country code to disambiguate.
+    `units` is "metric" (Celsius) or "imperial" (Fahrenheit)."""
+    api_key = os.environ.get("OPENWEATHERMAP_API_KEY")
+    if not api_key:
+        return "Error: OPENWEATHERMAP_API_KEY not set in environment"
+
+    if units not in ("metric", "imperial"):
+        return f"Error: unknown units {units!r} — use 'metric' or 'imperial'"
+
+    try:
+        import requests
+    except ImportError:
+        print("Error: requests library not available", file=sys.stderr)
+        return "Error: requests library required"
+
+    location = f"{city},{country}" if country else city
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "q": location,
+        "appid": api_key,
+        "units": units
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 404:
+            return f"City not found: {location}"
+        if response.status_code == 401:
+            return "Error: Invalid API key"
+        if response.status_code != 200:
+            return f"API error: {response.status_code}"
+
+        data = response.json()
+        temp = data["main"]["temp"]
+        feels_like = data["main"]["feels_like"]
+        humidity = data["main"]["humidity"]
+        description = data["weather"][0]["description"]
+        degrees = "°C" if units == "metric" else "°F"
+
+        return f"Weather in {data['name']}, {data['sys'].get('country', '')}: {description.capitalize()}, {temp}{degrees} (feels like {feels_like}{degrees}), humidity {humidity}%"
+    except requests.RequestException as e:
+        return f"Request failed: {str(e)}"
+    except (KeyError, ValueError) as e:
+        return f"Error parsing weather data: {str(e)}"
+<<<ENDFILE>>>

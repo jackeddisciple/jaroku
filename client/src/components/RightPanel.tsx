@@ -17,6 +17,7 @@ type Tab = "trace" | "code";
 export function RightPanel() {
   const [tab, setTab] = useState<Tab>("trace");
   const genStatus = useBuildStore((s) => s.status);
+  const codeFocus = useBuildStore((s) => s.codeFocus);
   const activeRunId = useTraceStore((s) => s.activeRunId);
   const prevRunId = useRef(activeRunId);
 
@@ -24,6 +25,11 @@ export function RightPanel() {
   useEffect(() => {
     if (genStatus === "generating") setTab("code");
   }, [genStatus]);
+
+  // A diff-card file row asked for the Code tab (fix loop).
+  useEffect(() => {
+    if (codeFocus > 0) setTab("code");
+  }, [codeFocus]);
 
   // A new run starts -> show its trace. That is the moment the product is about.
   useEffect(() => {

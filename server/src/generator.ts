@@ -12,16 +12,19 @@
 // Cost control: the stable half of the prompt carries a cache breakpoint, and
 // JAROKU_GEN_FIXTURE records/replays a generation so streaming UX can be iterated for free.
 
-import Anthropic from "@anthropic-ai/sdk";
 import { EventEmitter } from "node:events";
 import {
-  copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
+import { anthropicClient, emptyUsage, summarizeUsage, type UsageSummary } from "./claude.ts";
 import { loadConnectors, requiredEnv, resolveSelected, templatesDir, type Connector } from "./connectors.ts";
 import { FileProtocolParser, type ProtocolEvent } from "./fileProtocol.ts";
+import { atomicSwap } from "./projectFs.ts";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt.ts";
 import { validateProject } from "./validator.ts";
+
+export type { UsageSummary } from "./claude.ts";
 
 export const GENERATION_MODEL = process.env.JAROKU_GEN_MODEL ?? "claude-haiku-4-5";
 const MAX_TOKENS = 16000;
@@ -41,18 +44,6 @@ export interface GeneratorEvents {
   done: [{ agentId: string; name: string; files: string[]; usage: UsageSummary }];
   error: [{ message: string; problems?: string[] }];
 }
-
-export interface UsageSummary {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-  cost_usd: number;
-}
-
-// claude-haiku-4-5 list price, USD per token. Cache reads ~0.1x, writes ~1.25x.
-const PRICE_IN = 1e-6;
-const PRICE_OUT = 5e-6;
 
 export function slugify(text: string): string {
   const base = text
@@ -87,17 +78,6 @@ export function safeRelativePath(root: string, candidate: string): string | null
 }
 
 export class Generator extends EventEmitter<GeneratorEvents> {
-  private client: Anthropic | null = null;
-
-  private anthropic(): Anthropic {
-    if (!this.client) {
-      const key = process.env.ANTHROPIC_API_KEY;
-      if (!key) throw new Error("ANTHROPIC_API_KEY is not set (expected in runtime/.env)");
-      this.client = new Anthropic({ apiKey: key });
-    }
-    return this.client;
-  }
-
   async generate(opts: GenerateOptions): Promise<void> {
     const { runtimeDir } = opts;
     const all = loadConnectors(runtimeDir);
@@ -111,10 +91,7 @@ export class Generator extends EventEmitter<GeneratorEvents> {
     mkdirSync(staging, { recursive: true });
 
     const buffers = new Map<string, string>();
-    let usage: UsageSummary = {
-      input_tokens: 0, output_tokens: 0,
-      cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: 0,
-    };
+    let usage: UsageSummary = emptyUsage();
 
     const onEvent = (event: ProtocolEvent) => {
       if (event.type === "file_start") {
@@ -140,6 +117,12 @@ export class Generator extends EventEmitter<GeneratorEvents> {
     try {
       const fixture = process.env.JAROKU_GEN_FIXTURE;
       if (fixture && existsSync(fixture)) {
+        // Same warning as the edit path: replay ignores the prompt entirely, and a
+        // forgotten env var makes every generation return the same canned project.
+        console.warn(
+          `[gen] JAROKU_GEN_FIXTURE is set — replaying ${fixture}; the prompt is ` +
+            `ignored and the model is NOT being called. Unset it for real generations.`,
+        );
         await replayFixture(fixture, (chunk) => parser.push(chunk));
       } else {
         const raw = await this.streamGeneration(all, {
@@ -171,7 +154,7 @@ export class Generator extends EventEmitter<GeneratorEvents> {
         return;
       }
 
-      this.commit(staging, join(agentsDir(runtimeDir), agentId));
+      atomicSwap(staging, join(agentsDir(runtimeDir), agentId));
       this.emit("done", { agentId, name, files: parser.files, usage });
     } catch (err) {
       rmSync(staging, { recursive: true, force: true });
@@ -186,14 +169,18 @@ export class Generator extends EventEmitter<GeneratorEvents> {
     onUsage: (u: UsageSummary) => void,
   ): Promise<string> {
     let raw = "";
-    const stream = this.anthropic().messages.stream({
+    const stream = anthropicClient().messages.stream({
       model: GENERATION_MODEL,
       max_tokens: MAX_TOKENS,
       system: [
         {
           type: "text",
           text: buildSystemPrompt(allConnectors),
-          // Stable across every generation -> cache hit on all but the first call.
+          // Byte-stable across every generation. NOTE: haiku-4-5's minimum cacheable
+          // prefix is 4096 tokens and this prompt is ~2.3k, so the marker is currently
+          // inert (cache_creation stays 0) — the "cache hit" this comment used to promise
+          // never actually happened. Kept because it costs nothing and takes effect the
+          // moment the prompt grows or the model changes. Verified 2026-07-23.
           cache_control: { type: "ephemeral" },
         },
       ],
@@ -206,18 +193,7 @@ export class Generator extends EventEmitter<GeneratorEvents> {
     });
 
     const final = await stream.finalMessage();
-    const u = final.usage;
-    onUsage({
-      input_tokens: u.input_tokens,
-      output_tokens: u.output_tokens,
-      cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
-      cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
-      cost_usd:
-        u.input_tokens * PRICE_IN +
-        u.output_tokens * PRICE_OUT +
-        (u.cache_read_input_tokens ?? 0) * PRICE_IN * 0.1 +
-        (u.cache_creation_input_tokens ?? 0) * PRICE_IN * 1.25,
-    });
+    onUsage(summarizeUsage(final.usage));
     return raw;
   }
 
@@ -277,23 +253,10 @@ export class Generator extends EventEmitter<GeneratorEvents> {
     writeFileSync(join(staging, "__init__.py"), `"""${meta.name} — generated by Jaroku."""\n`, "utf8");
   }
 
-  /** Replace agents/<id>/ with the staged project, keeping the old copy until it succeeds. */
-  private commit(staging: string, target: string): void {
-    const backup = `${target}.replaced-${Date.now()}`;
-    if (existsSync(target)) renameSync(target, backup);
-    try {
-      mkdirSync(dirname(target), { recursive: true });
-      renameSync(staging, target);
-    } catch (err) {
-      if (existsSync(backup)) renameSync(backup, target); // put it back
-      throw err;
-    }
-    rmSync(backup, { recursive: true, force: true });
-  }
 }
 
-/** Replay a recorded generation, chunked and paced, so the UI behaves as it would live. */
-async function replayFixture(path: string, onChunk: (text: string) => void): Promise<void> {
+/** Replay a recorded stream, chunked and paced, so the UI behaves as it would live. */
+export async function replayFixture(path: string, onChunk: (text: string) => void): Promise<void> {
   const raw = readFileSync(path, "utf8");
   const size = 24;
   for (let i = 0; i < raw.length; i += size) {

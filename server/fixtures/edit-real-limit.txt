@@ -1,0 +1,17 @@
+Add LIMIT 100 to the recent_orders SQL query.
+<<<FILE path="tools/orders.py">>>
+from __future__ import annotations
+
+from langchain_core.tools import tool
+
+from .postgres import pg_query
+
+
+@tool
+def recent_orders() -> str:
+    """List recent orders (id, customer email, status, total), newest first."""
+    # pg_query is a StructuredTool, not a plain function — invoke it, don't call it.
+    return pg_query.invoke(
+        {"sql": "SELECT id, customer_email, status, total FROM orders ORDER BY created_at DESC LIMIT 100"}
+    )
+<<<ENDFILE>>>

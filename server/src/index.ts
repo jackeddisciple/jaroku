@@ -5,13 +5,17 @@
 // Run:  npm run dev        (in server/)
 // Then open http://localhost:4317 to watch traces live.
 
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { ProcessManager } from "./processManager.ts";
 import { TraceStore } from "./store.ts";
-import { WsRelay, type GenerateCommand, type RunCommand } from "./wsRelay.ts";
+import { WsRelay, type ForwardedCommand, type GenerateCommand } from "./wsRelay.ts";
 import { Generator } from "./generator.ts";
+import { Editor, editCount } from "./editor.ts";
 import { listAgents } from "./agents.ts";
+import { loadConnectors } from "./connectors.ts";
+import { isSafeAgentId, listProjectFiles } from "./projectFs.ts";
 import { loadRuntimeEnv } from "./env.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -27,23 +31,66 @@ if (loadedKeys.length) {
   console.log(`[server] loaded ${loadedKeys.length} var(s) from runtime/.env: ${loadedKeys.sort().join(", ")}`);
 }
 
+// Stale staging (a proposal or generation interrupted by a previous shutdown) must not
+// survive a restart — pending proposals are in-memory, so their staging dirs are orphans.
+rmSync(join(RUNTIME_DIR, "agents", ".staging"), { recursive: true, force: true });
+
 const store = new TraceStore(DB_PATH);
 const manager = new ProcessManager();
 const generator = new Generator();
+
+// True from spawn until run_end (or exit). Deliberately NOT manager.running: the process
+// outlives its run_end by a beat while it tears down, and refusing an apply/undo in that
+// window is a race the user would hit by clicking right after a run finishes. Once
+// run_end is emitted the graph is done and the project files are no longer being read.
+let runActive = false;
+
+const editor = new Editor({
+  runtimeDir: RUNTIME_DIR,
+  canMutate: () => (runActive ? "cannot modify the agent while a run is in progress" : null),
+});
+
+/** Current on-disk files of an agent project, connector files flagged read-only. */
+function agentProjectFiles(agentId: string): unknown[] {
+  if (!isSafeAgentId(agentId)) return [];
+  const dir = join(RUNTIME_DIR, "agents", agentId);
+  if (!existsSync(dir)) return [];
+  let connectors: string[] = [];
+  try {
+    const meta = JSON.parse(readFileSync(join(dir, "jaroku.json"), "utf8")) as { connectors?: string[] };
+    connectors = meta.connectors ?? [];
+  } catch {
+    /* metadata optional */
+  }
+  const files = loadConnectors(RUNTIME_DIR)
+    .filter((c) => connectors.includes(c.id))
+    .map((c) => `tools/${c.file}`);
+  return listProjectFiles(dir, files);
+}
 
 const relay = new WsRelay({
   port: PORT,
   store,
   clientHtmlPath: join(SERVER_DIR, "debug-client.html"),
-  listAgents: () => listAgents(RUNTIME_DIR),
-  onCommand: (cmd: RunCommand | GenerateCommand) => {
+  listAgents: () =>
+    listAgents(RUNTIME_DIR).map((a) => ({
+      ...a,
+      edit_count: editCount(RUNTIME_DIR, a.agent_id),
+    })),
+  listAgentFiles: agentProjectFiles,
+  onCommand: (cmd: ForwardedCommand) => {
     if (cmd.cmd === "run") runAgent(cmd.input, cmd.provider, cmd.model, cmd.agentId);
     else if (cmd.cmd === "generate") generateAgent(cmd);
+    else if (cmd.cmd === "edit") editAgent(cmd.agentId, cmd.instruction);
+    else if (cmd.cmd === "applyEdit") editor.apply(cmd.proposalId);
+    else if (cmd.cmd === "undoEdit") editor.undo(cmd.agentId);
+    else if (cmd.cmd === "discardEdit") editor.discard(cmd.proposalId);
   },
 });
 
 // --- pipeline ---------------------------------------------------------------
 manager.on("event", (event) => {
+  if (event.kind === "run_end") runActive = false;
   // Persist first (source of truth), then broadcast to live clients.
   try {
     if (event.kind === "run_start" || event.kind === "run_end") {
@@ -68,10 +115,12 @@ manager.on("stderr", (line) => {
 });
 
 manager.on("spawnError", (err) => {
+  runActive = false;
   console.error("[manager] spawn error:", err.message);
 });
 
 manager.on("exit", ({ code, signal }) => {
+  runActive = false; // covers a crash before run_end ever arrived
   console.log(`[manager] agent exited (code=${code} signal=${signal})`);
 });
 
@@ -134,6 +183,48 @@ function generateAgent(cmd: GenerateCommand): void {
   });
 }
 
+// --- editing (fix loop) -----------------------------------------------------
+// Streams into the "edit" channel. Like generation, nothing here touches the trace store
+// or the frozen event schema. Listeners are permanent — every event carries its ids.
+editor.on("file_start", (e) => relay.broadcastEdit({ type: "file_start", ...e }));
+editor.on("file_delta", (e) => relay.broadcastEdit({ type: "file_delta", ...e }));
+editor.on("file_end", (e) => relay.broadcastEdit({ type: "file_end", ...e }));
+
+editor.on("proposal", (e) => {
+  console.log(
+    `[edit] proposal for ${e.agentId} — ${e.files.length} file(s): ${e.summary}`,
+  );
+  relay.broadcastEdit({ type: "proposal", ...e });
+});
+
+editor.on("applied", (e) => {
+  console.log(`[edit] applied v${e.version} to ${e.agentId}: ${e.summary}`);
+  relay.broadcastEdit({ type: "applied", ...e });
+  relay.broadcastAgents();
+  relay.broadcastAgentFiles(e.agentId);
+});
+
+editor.on("undone", (e) => {
+  console.log(`[edit] undid v${e.version} on ${e.agentId}`);
+  relay.broadcastEdit({ type: "undone", ...e });
+  relay.broadcastAgents();
+  relay.broadcastAgentFiles(e.agentId);
+});
+
+editor.on("discarded", (e) => relay.broadcastEdit({ type: "discarded", ...e }));
+
+editor.on("error", (e) => {
+  console.error(`[edit] failed: ${e.message}`);
+  for (const p of e.problems ?? []) console.error(`  - ${p}`);
+  relay.broadcastEdit({ type: "error", ...e });
+});
+
+function editAgent(agentId: string, instruction: string): void {
+  console.log(`[edit] ${agentId} — "${instruction.slice(0, 80)}"`);
+  relay.broadcastEdit({ type: "started", agentId, instruction });
+  void editor.propose(agentId, instruction);
+}
+
 // --- run trigger ------------------------------------------------------------
 function runAgent(input?: string, provider?: string, model?: string, agentId?: string): void {
   if (manager.running) {
@@ -146,6 +237,7 @@ function runAgent(input?: string, provider?: string, model?: string, agentId?: s
   const env: NodeJS.ProcessEnv = {};
   if (provider) env.JAROKU_PROVIDER = provider;
   if (model) env.JAROKU_MODEL = model;
+  runActive = true;
   manager.start({
     runtimeDir: RUNTIME_DIR,
     input,

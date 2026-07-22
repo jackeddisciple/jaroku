@@ -5,7 +5,7 @@
 // churn to a store whose correctness matters. They share a socket and nothing else.
 
 import { create } from "zustand";
-import type { AgentSummary, GenUsage } from "../types.ts";
+import type { AgentFile, AgentSummary, GenUsage } from "../types.ts";
 
 export type GenStatus = "idle" | "generating" | "done" | "error";
 
@@ -13,6 +13,7 @@ export interface GenFile {
   path: string;
   content: string;
   complete: boolean;
+  readOnly?: boolean; // connector templates + host-owned metadata (fix loop: not editable)
 }
 
 interface BuildState {
@@ -28,6 +29,8 @@ interface BuildState {
 
   agents: AgentSummary[];
   activeAgentId: string | null;
+  // Bumped when something (e.g. a diff-card file row) asks the Code tab to take focus.
+  codeFocus: number;
 
   startGeneration: (prompt: string) => void;
   fileStart: (path: string) => void;
@@ -38,6 +41,8 @@ interface BuildState {
   selectFile: (path: string) => void;
   setAgents: (agents: AgentSummary[]) => void;
   selectAgent: (agentId: string | null) => void;
+  setAgentFiles: (agentId: string, files: AgentFile[]) => void;
+  openInCode: (path: string) => void;
 }
 
 export const useBuildStore = create<BuildState>((set) => ({
@@ -52,6 +57,7 @@ export const useBuildStore = create<BuildState>((set) => ({
   usage: null,
   agents: [],
   activeAgentId: null,
+  codeFocus: 0,
 
   startGeneration: (prompt) =>
     set({
@@ -100,6 +106,12 @@ export const useBuildStore = create<BuildState>((set) => ({
 
   selectFile: (path) => set({ activeFile: path }),
 
+  openInCode: (path) =>
+    set((s) => ({
+      activeFile: s.files[path] ? path : s.activeFile,
+      codeFocus: s.codeFocus + 1,
+    })),
+
   setAgents: (agents) =>
     set((s) => ({
       agents,
@@ -111,6 +123,24 @@ export const useBuildStore = create<BuildState>((set) => ({
     })),
 
   selectAgent: (activeAgentId) => set({ activeAgentId }),
+
+  // Current on-disk files of the selected agent (sent after selection, apply, or undo) so
+  // the Code tab always shows what will actually run. Never clobbers a live generation.
+  setAgentFiles: (agentId, files) =>
+    set((s) => {
+      if (s.status === "generating" || agentId !== s.activeAgentId) return {};
+      const record: Record<string, GenFile> = {};
+      for (const f of files) {
+        record[f.path] = { path: f.path, content: f.content, complete: true, readOnly: f.readOnly };
+      }
+      const order = files.map((f) => f.path);
+      return {
+        files: record,
+        fileOrder: order,
+        streamingFile: null,
+        activeFile: s.activeFile && record[s.activeFile] ? s.activeFile : (order[0] ?? null),
+      };
+    }),
 }));
 
 /** Files in arrival order — the order they streamed in, which is the order they were built. */
